@@ -1,7 +1,7 @@
 import { ChevronDown } from "lucide-react";
 import { useState } from "react";
 
-export type FacetKey = "basin" | "area" | "project_year" | "type_of_processing";
+export type FacetKey = "basin" | "project_type" | "project_year" | "type_of_processing";
 
 type Facet = {
   key: FacetKey;
