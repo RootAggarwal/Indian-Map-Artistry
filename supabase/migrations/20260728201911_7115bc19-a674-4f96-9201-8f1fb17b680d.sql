@@ -1,0 +1,85 @@
+CREATE TABLE public.projects (
+  project_id INT PRIMARY KEY,
+  project_name TEXT NOT NULL,
+  basin TEXT,
+  project_type TEXT,
+  data_dimension TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE public.processing_records (
+  id SERIAL PRIMARY KEY,
+  project_id INT NOT NULL REFERENCES public.projects(project_id) ON DELETE CASCADE,
+  si_code TEXT,
+  project_year TEXT,
+  type_of_processing TEXT,
+  quantum_skm NUMERIC,
+  quantum_slkm NUMERIC,
+  processing_bin TEXT,
+  record_length TEXT,
+  sampling_interval TEXT,
+  fold TEXT,
+  azimuth TEXT,
+  spheroid TEXT,
+  utm_zone TEXT,
+  projection TEXT,
+  project_timeline TEXT,
+  g1_x NUMERIC, g1_y NUMERIC, g1_il NUMERIC, g1_xl NUMERIC,
+  g2_x NUMERIC, g2_y NUMERIC, g2_il NUMERIC, g2_xl NUMERIC,
+  g3_x NUMERIC, g3_y NUMERIC, g3_il NUMERIC, g3_xl NUMERIC,
+  g4_x NUMERIC, g4_y NUMERIC, g4_il NUMERIC, g4_xl NUMERIC,
+  centroid_lat NUMERIC, centroid_lon NUMERIC,
+  bbox_min_lon NUMERIC, bbox_min_lat NUMERIC, bbox_max_lon NUMERIC, bbox_max_lat NUMERIC,
+  corners JSONB NOT NULL DEFAULT '[]'::jsonb,
+  is_mapped BOOLEAN NOT NULL DEFAULT false,
+  geometry_status TEXT,
+  geometry_notes TEXT[] NOT NULL DEFAULT '{}',
+  flagged_for_review BOOLEAN NOT NULL DEFAULT false,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE public.project_reports (
+  id SERIAL PRIMARY KEY,
+  project_id INT NOT NULL REFERENCES public.projects(project_id) ON DELETE CASCADE,
+  si_code TEXT,
+  report_type TEXT,
+  report_path TEXT,
+  file_name TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE public.audit_logs (
+  id SERIAL PRIMARY KEY,
+  user_session TEXT,
+  action TEXT NOT NULL,
+  project_id INT,
+  si_code TEXT,
+  basin TEXT,
+  details JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_projects_basin ON public.projects(basin);
+CREATE INDEX idx_pr_project_id ON public.processing_records(project_id);
+CREATE INDEX idx_pr_year ON public.processing_records(project_year);
+CREATE INDEX idx_reports_project ON public.project_reports(project_id);
+CREATE INDEX idx_audit_project ON public.audit_logs(project_id);
+CREATE INDEX idx_audit_basin ON public.audit_logs(basin);
+
+GRANT SELECT ON public.projects TO anon, authenticated;
+GRANT SELECT ON public.processing_records TO anon, authenticated;
+GRANT SELECT ON public.project_reports TO anon, authenticated;
+GRANT SELECT, INSERT ON public.audit_logs TO anon, authenticated;
+GRANT USAGE, SELECT ON SEQUENCE public.audit_logs_id_seq TO anon, authenticated;
+GRANT ALL ON public.projects TO service_role;
+GRANT ALL ON public.processing_records TO service_role;
+GRANT ALL ON public.project_reports TO service_role;
+GRANT ALL ON public.audit_logs TO service_role;
+
+ALTER TABLE public.projects ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.processing_records ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.project_reports ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.audit_logs ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Public read projects" ON public.projects FOR SELECT TO anon, authenticated USING (true);
+CREATE POLICY "Public read processing records" ON public.processing_records FOR SELECT TO anon, authenticated USING (true);
+CREATE POLICY "Public read reports" ON public.project_reports FOR SELECT TO anon, authenticated USING (true);
+CREATE POLICY "Public read audit logs" ON public.audit_logs FOR SELECT TO anon, authenticated USING (true);
+CREATE POLICY "Anyone can append audit logs" ON public.audit_logs FOR INSERT TO anon, authenticated WITH CHECK (true);
