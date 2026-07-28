@@ -141,7 +141,7 @@ export async function logAudit(
       project_id: payload.project_id ?? null,
       si_code: payload.si_code ?? null,
       basin: payload.basin ?? null,
-      details: payload.details ?? {},
+      details: (payload.details ?? {}) as never,
     });
   } catch (err) {
     console.warn("audit log failed", err);
