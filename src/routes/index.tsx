@@ -42,14 +42,14 @@ export const Route = createFileRoute("/")({
 
 const EMPTY: Record<FacetKey, string[]> = {
   basin: [],
-  project_type: [],
+  area: [],
   project_year: [],
   type_of_processing: [],
 };
 
 function facetValue(rec: SurveyRecord, key: FacetKey) {
   if (key === "basin") return rec.projects?.basin ?? "Unspecified";
-  if (key === "project_type") return rec.projects?.project_type ?? "Unspecified";
+  if (key === "area") return rec.utm_zone ? `UTM ${rec.utm_zone}` : "Unspecified";
   if (key === "project_year") return rec.project_year ?? "Unspecified";
   return rec.type_of_processing ?? "Unspecified";
 }
@@ -92,7 +92,7 @@ function Dashboard() {
       (
         [
           ["basin", "Basin"],
-          ["project_type", "Area / Block"],
+          ["area", "Area (UTM zone)"],
           ["project_year", "Year of Processing"],
           ["type_of_processing", "Type of Processing"],
         ] as [FacetKey, string][]
