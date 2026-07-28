@@ -227,9 +227,9 @@ function Dashboard() {
             {adjusted > 0 && (
               <p className="flex items-start gap-2 border-t border-border bg-rust/10 px-3 py-2 text-[0.7rem] leading-snug text-foreground/85">
                 <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-rust" />
-                {adjusted} footprint{adjusted > 1 ? "s" : ""} in view were squared to an
-                axis-aligned box and clipped to the Indian boundary — see the cartographic note in
-                the dossier for each survey.
+                {adjusted} footprint{adjusted > 1 ? "s" : ""} in view carry a cartographic note — squared to an
+                axis-aligned box and/or clipped to the Indian boundary. Footprints outlined in dashed
+                rust have an implausibly large extent in the source data and should be verified.
               </p>
             )}
           </section>
