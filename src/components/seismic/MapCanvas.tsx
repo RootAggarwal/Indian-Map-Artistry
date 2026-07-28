@@ -168,6 +168,9 @@ export function MapCanvas({
           const h = py(s.bbox_min_lat as number) - y;
           const active = s.id === selectedId;
           const dim = yearFilterActive != null && s.project_year !== yearFilterActive;
+          const suspect =
+            (s.bbox_max_lon as number) - (s.bbox_min_lon as number) > 6 ||
+            (s.bbox_max_lat as number) - (s.bbox_min_lat as number) > 6;
           return (
             <rect
               key={s.id}
@@ -176,9 +179,22 @@ export function MapCanvas({
               width={Math.max(w, 1.4)}
               height={Math.max(h, 1.4)}
               rx={0.6}
-              fill={active ? "oklch(0.78 0.152 74 / 0.5)" : "oklch(0.72 0.121 190 / 0.32)"}
-              stroke={active ? "oklch(0.86 0.16 78)" : "oklch(0.75 0.12 190)"}
-              strokeWidth={(active ? 2.1 : 0.9) * strokeScale}
+              fill={
+                suspect
+                  ? "transparent"
+                  : active
+                    ? "oklch(0.78 0.152 74 / 0.5)"
+                    : "oklch(0.72 0.121 190 / 0.32)"
+              }
+              stroke={
+                suspect
+                  ? "oklch(0.66 0.17 30)"
+                  : active
+                    ? "oklch(0.86 0.16 78)"
+                    : "oklch(0.75 0.12 190)"
+              }
+              strokeDasharray={suspect ? `${5 * strokeScale} ${4 * strokeScale}` : undefined}
+              strokeWidth={(active ? 2.1 : suspect ? 1.2 : 0.9) * strokeScale}
               opacity={dim ? 0.14 : 1}
               className="transition-opacity duration-300"
               onMouseEnter={() => setHover(s)}
