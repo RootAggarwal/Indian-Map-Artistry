@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Activity, Info } from "lucide-react";
 import {
   counts,
@@ -8,6 +8,8 @@ import {
   fetchReports,
   fetchSurveys,
   logAudit,
+  saveSurveys,
+  type SurveyDraft,
   type SurveyRecord,
 } from "@/lib/seismic";
 import { buildProjectReport } from "@/lib/report-pdf";
@@ -17,6 +19,7 @@ import { RibbonBar } from "@/components/seismic/RibbonBar";
 import { EntityPanel } from "@/components/seismic/EntityPanel";
 import { BottomBar } from "@/components/seismic/BottomBar";
 import { DetailsDialog } from "@/components/seismic/DetailsDialog";
+import { AddSurveyDialog } from "@/components/seismic/AddSurveyDialog";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -43,6 +46,7 @@ export const Route = createFileRoute("/")({
 const EMPTY: Record<FacetKey, string[]> = {
   basin: [],
   area: [],
+  data_dimension: [],
   project_year: [],
   type_of_processing: [],
 };
@@ -50,11 +54,13 @@ const EMPTY: Record<FacetKey, string[]> = {
 function facetValue(rec: SurveyRecord, key: FacetKey) {
   if (key === "basin") return rec.projects?.basin ?? "Unspecified";
   if (key === "area") return rec.utm_zone ? `UTM ${rec.utm_zone}` : "Unspecified";
+  if (key === "data_dimension") return (rec.projects?.data_dimension ?? "Unspecified").toUpperCase();
   if (key === "project_year") return rec.project_year ?? "Unspecified";
   return rec.type_of_processing ?? "Unspecified";
 }
 
 function Dashboard() {
+  const queryClient = useQueryClient();
   const surveys = useQuery({ queryKey: ["surveys"], queryFn: fetchSurveys });
   const reports = useQuery({ queryKey: ["reports"], queryFn: fetchReports });
 
@@ -66,6 +72,8 @@ function Dashboard() {
   const [resetSignal, setResetSignal] = useState(0);
   const [yearIndex, setYearIndex] = useState(0);
   const [playing, setPlaying] = useState(false);
+  const [query, setQuery] = useState("");
+  const [addOpen, setAddOpen] = useState(false);
   const nonce = useRef(0);
 
   const all = surveys.data ?? [];
@@ -76,16 +84,26 @@ function Dashboard() {
   );
   const timelineYear = years[yearIndex] === "ALL" ? null : (years[yearIndex] ?? null);
 
-  const filtered = useMemo(
-    () =>
-      all.filter((rec) =>
-        (Object.keys(selected) as FacetKey[]).every((key) => {
-          const picks = selected[key];
-          return picks.length === 0 || picks.includes(facetValue(rec, key));
-        }),
-      ),
-    [all, selected],
-  );
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return all.filter((rec) => {
+      const facetOk = (Object.keys(selected) as FacetKey[]).every((key) => {
+        const picks = selected[key];
+        return picks.length === 0 || picks.includes(facetValue(rec, key));
+      });
+      if (!facetOk) return false;
+      if (!q) return true;
+      return [
+        rec.projects?.project_name,
+        rec.type_of_processing,
+        rec.si_code,
+        rec.projects?.basin,
+        rec.project_year,
+      ]
+        .filter(Boolean)
+        .some((v) => String(v).toLowerCase().includes(q));
+    });
+  }, [all, selected, query]);
 
   const facets = useMemo(
     () =>
@@ -93,6 +111,7 @@ function Dashboard() {
         [
           ["basin", "Basin"],
           ["area", "Area (UTM zone)"],
+          ["data_dimension", "Data Dimension"],
           ["project_year", "Year of Processing"],
           ["type_of_processing", "Type of Processing"],
         ] as [FacetKey, string][]
@@ -146,6 +165,14 @@ function Dashboard() {
       si_code: rec.si_code,
       basin: rec.projects?.basin ?? null,
       details: { format: "pdf" },
+    });
+  }
+
+  async function handleAdd(drafts: SurveyDraft[]) {
+    await saveSurveys(drafts);
+    await queryClient.invalidateQueries({ queryKey: ["surveys"] });
+    void logAudit("PROJECT_VIEWED", {
+      details: { created: drafts.length, source: drafts.length > 1 ? "import" : "manual" },
     });
   }
 
@@ -212,6 +239,10 @@ function Dashboard() {
                 setPlaying((p) => !p);
                 void logAudit("TIMELINE_PLAYED");
               }}
+              query={query}
+              setQuery={setQuery}
+              matches={filtered.length}
+              onAdd={() => setAddOpen(true)}
             />
             <div className="min-h-[18rem] flex-1">
               <MapCanvas
@@ -259,6 +290,13 @@ function Dashboard() {
           />
         </div>
       </div>
+
+      <AddSurveyDialog
+        open={addOpen}
+        onClose={() => setAddOpen(false)}
+        onSubmit={handleAdd}
+        basins={[...new Set(all.map((r) => r.projects?.basin).filter(Boolean) as string[])].sort()}
+      />
 
       <DetailsDialog
         rec={dialogRec}

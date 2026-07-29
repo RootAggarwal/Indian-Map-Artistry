@@ -1,4 +1,5 @@
 import {
+  createSurveys,
   getAuditLogs,
   getReports,
   getSurveys,
@@ -74,6 +75,12 @@ export type AuditRow = {
   details: Record<string, unknown>;
   created_at: string;
 };
+
+export type { SurveyDraft } from "@/lib/seismic.functions";
+
+export async function saveSurveys(drafts: import("@/lib/seismic.functions").SurveyDraft[]) {
+  return await createSurveys({ data: { drafts } });
+}
 
 export async function fetchSurveys(): Promise<SurveyRecord[]> {
   return (await getSurveys()) as unknown as SurveyRecord[];

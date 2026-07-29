@@ -1,7 +1,12 @@
-import { ChevronDown } from "lucide-react";
+import { ChevronDown, Search } from "lucide-react";
 import { useState } from "react";
 
-export type FacetKey = "basin" | "area" | "project_year" | "type_of_processing";
+export type FacetKey =
+  | "basin"
+  | "area"
+  | "project_year"
+  | "type_of_processing"
+  | "data_dimension";
 
 type Facet = {
   key: FacetKey;
@@ -61,7 +66,11 @@ function FacetBlock({
   toggle: (key: FacetKey, value: string) => void;
 }) {
   const [open, setOpen] = useState(true);
+  const [q, setQ] = useState("");
   const max = Math.max(...facet.options.map(([, c]) => c), 1);
+  const options = q.trim()
+    ? facet.options.filter(([v]) => v.toLowerCase().includes(q.trim().toLowerCase()))
+    : facet.options;
 
   return (
     <section className="border-b border-border">
@@ -85,8 +94,19 @@ function FacetBlock({
       </button>
 
       {open && (
+        <>
+        <div className="relative border-b border-border/60 px-3 py-2">
+          <Search className="pointer-events-none absolute left-5 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
+          <input
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder={`Search ${facet.label.toLowerCase()}`}
+            aria-label={`Search ${facet.label}`}
+            className="w-full border border-border bg-ink py-1 pl-6 pr-2 text-[0.72rem] text-foreground outline-none transition-colors placeholder:text-muted-foreground/60 focus:border-ochre"
+          />
+        </div>
         <ul className="max-h-52 overflow-y-auto py-1">
-          {facet.options.map(([value, count]) => {
+          {options.map(([value, count]) => {
             const on = selected.includes(value);
             return (
               <li key={value}>
@@ -119,7 +139,11 @@ function FacetBlock({
               </li>
             );
           })}
+          {options.length === 0 && (
+            <li className="px-4 py-2 text-[0.72rem] text-muted-foreground">No matches.</li>
+          )}
         </ul>
+        </>
       )}
     </section>
   );
