@@ -300,7 +300,7 @@ export function AddSurveyDialog({ open, onClose, onSubmit, basins }: Props) {
                       ["max_lat", "North lat"],
                     ] as [keyof SurveyDraft, string][]
                   ).map(([k, label]) => (
-                    <Labeled key={k} label={label}>
+                    <Labeled key={String(k)} label={label}>
                       <input
                         className={field}
                         inputMode="decimal"
