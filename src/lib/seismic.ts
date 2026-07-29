@@ -1,4 +1,9 @@
-import { supabase } from "@/integrations/supabase/client";
+import {
+  getAuditLogs,
+  getReports,
+  getSurveys,
+  recordAudit,
+} from "@/lib/seismic.functions";
 
 export type Corner = {
   lat: number | null;
