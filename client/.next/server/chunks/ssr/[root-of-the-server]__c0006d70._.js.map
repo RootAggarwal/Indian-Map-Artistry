@@ -1,0 +1,6 @@
+{
+  "version": 3,
+  "sources": [],
+  "sections": [
+    {"offset": {"line": 10, "column": 0}, "map": {"version":3,"sources":["file:///home/ongc/Downloads/india-map-artistry/client/app/providers.tsx"],"sourcesContent":["\"use client\"\n\nimport { QueryClient, QueryClientProvider } from \"@tanstack/react-query\"\nimport { useState, type ReactNode } from \"react\"\n\nexport function Providers({ children }: { children: ReactNode }) {\n  const [queryClient] = useState(() => new QueryClient())\n\n  return (\n    <QueryClientProvider client={queryClient}>\n      {children}\n    </QueryClientProvider>\n  )\n}\n"],"names":[],"mappings":";;;;;AAEA;AAAA;AACA;AAHA;;;;AAKO,SAAS,UAAU,EAAE,QAAQ,EAA2B;IAC7D,MAAM,CAAC,YAAY,GAAG,IAAA,2NAAQ,EAAC,IAAM,IAAI,sMAAW;IAEpD,qBACE,wPAAC,uNAAmB;QAAC,QAAQ;kBAC1B;;;;;;AAGP","debugId":null}}]
+}

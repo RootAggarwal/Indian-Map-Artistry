@@ -1,0 +1,210 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --radius-sm: calc(var(--radius) - 3px);
+  --radius-md: calc(var(--radius) - 1px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-seismic: var(--seismic);
+  --color-seismic-soft: var(--seismic-soft);
+  --color-ochre: var(--ochre);
+  --color-rust: var(--rust);
+  --color-ink: var(--ink);
+  --color-chart-1: var(--seismic);
+  --color-chart-2: var(--ochre);
+  --color-chart-3: var(--rust);
+  --color-chart-4: var(--primary);
+  --color-chart-5: var(--muted-foreground);
+  --font-display: "Bricolage Grotesque", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "DM Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+}
+
+:root {
+  --radius: 0.35rem;
+
+  --background: oklch(0.19 0.021 250);
+  --foreground: oklch(0.94 0.012 90);
+
+  --ink: oklch(0.145 0.02 250);
+  --surface: oklch(0.235 0.024 250);
+  --surface-2: oklch(0.28 0.026 250);
+
+  --card: oklch(0.235 0.024 250);
+  --card-foreground: oklch(0.94 0.012 90);
+  --popover: oklch(0.21 0.022 250);
+  --popover-foreground: oklch(0.94 0.012 90);
+
+  --primary: oklch(0.78 0.152 74);
+  --primary-foreground: oklch(0.19 0.03 60);
+
+  --secondary: oklch(0.3 0.026 250);
+  --secondary-foreground: oklch(0.93 0.012 90);
+
+  --muted: oklch(0.28 0.022 250);
+  --muted-foreground: oklch(0.71 0.02 245);
+
+  --accent: oklch(0.72 0.121 190);
+  --accent-foreground: oklch(0.18 0.03 200);
+
+  --destructive: oklch(0.62 0.19 28);
+  --destructive-foreground: oklch(0.97 0.01 60);
+
+  --border: oklch(0.34 0.024 250);
+  --input: oklch(0.32 0.024 250);
+  --ring: oklch(0.78 0.152 74);
+
+  --seismic: oklch(0.72 0.121 190);
+  --seismic-soft: oklch(0.55 0.09 195);
+  --ochre: oklch(0.78 0.152 74);
+  --rust: oklch(0.63 0.17 40);
+
+  --shadow-panel: 0 20px 50px -28px oklch(0.08 0.02 250 / 0.9);
+  --grain-opacity: 0.05;
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+
+  html,
+  body {
+    height: 100%;
+  }
+
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    font-family: var(--font-sans);
+    font-feature-settings: "ss01", "cv05";
+    -webkit-font-smoothing: antialiased;
+  }
+
+  ::-webkit-scrollbar {
+    width: 9px;
+    height: 9px;
+  }
+  ::-webkit-scrollbar-track {
+    background: var(--ink);
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--surface-2);
+    border-radius: 99px;
+    border: 2px solid var(--ink);
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--seismic-soft);
+  }
+}
+
+@utility grain {
+  position: relative;
+  &::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    opacity: var(--grain-opacity);
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)' opacity='0.65'/%3E%3C/svg%3E");
+    mix-blend-mode: overlay;
+  }
+}
+
+@utility survey-grid {
+  background-image:
+    linear-gradient(to right, oklch(1 0 0 / 0.035) 1px, transparent 1px),
+    linear-gradient(to bottom, oklch(1 0 0 / 0.035) 1px, transparent 1px);
+  background-size: 26px 26px;
+}
+
+@utility panel {
+  background-color: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-panel);
+}
+
+@utility rail-label {
+  font-family: var(--font-mono);
+  font-size: 0.625rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
+}
+
+@utility slab {
+  font-family: var(--font-display);
+  font-weight: 700;
+  letter-spacing: -0.025em;
+}
+
+@utility data-cell {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  letter-spacing: -0.01em;
+}
+
+@utility hairline-top {
+  border-top: 1px solid var(--border);
+}
+
+@utility tape {
+  background: repeating-linear-gradient(
+    -45deg,
+    oklch(0.78 0.152 74 / 0.16) 0 8px,
+    transparent 8px 16px
+  );
+}
+
+@keyframes sweep {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(220%); }
+}
+
+@utility sweeping {
+  &::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg, transparent, oklch(0.72 0.121 190 / 0.18), transparent);
+    animation: sweep 2.4s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+  }
+}
+
+@keyframes rise {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: none; }
+}
+
+@utility rise-in {
+  animation: rise 0.42s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@media print {
+  body { background: white; color: black; }
+}
