@@ -119,13 +119,15 @@ export async function logAudit(
   } = {},
 ) {
   try {
-    await supabase.from("audit_logs").insert({
-      user_session: getSession(),
-      action,
-      project_id: payload.project_id ?? null,
-      si_code: payload.si_code ?? null,
-      basin: payload.basin ?? null,
-      details: (payload.details ?? {}) as never,
+    await recordAudit({
+      data: {
+        user_session: getSession(),
+        action,
+        project_id: payload.project_id ?? null,
+        si_code: payload.si_code ?? null,
+        basin: payload.basin ?? null,
+        details: payload.details ?? {},
+      },
     });
   } catch (err) {
     console.warn("audit log failed", err);
