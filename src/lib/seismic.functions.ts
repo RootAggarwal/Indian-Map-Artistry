@@ -134,8 +134,15 @@ export const createSurveys = createServerFn({ method: "POST" })
     if (lastErr) throw new Error("Unable to allocate project id");
     let nextId = (last?.[0]?.project_id ?? 0) + 1;
 
-    const projects: Record<string, unknown>[] = [];
-    const records: Record<string, unknown>[] = [];
+    type ProjectInsert = {
+      project_id: number;
+      project_name: string;
+      basin: string | null;
+      project_type: string | null;
+      data_dimension: string | null;
+    };
+    const projects: ProjectInsert[] = [];
+    const records: (Record<string, unknown> & { project_id: number; is_mapped: boolean })[] = [];
 
     for (const d of input.drafts) {
       const projectId = nextId++;
@@ -208,7 +215,7 @@ export const createSurveys = createServerFn({ method: "POST" })
       console.error("[seismic] project insert failed", pErr);
       throw new Error("Unable to save project");
     }
-    const { error: rErr } = await supabaseAdmin.from("processing_records").insert(records);
+    const { error: rErr } = await supabaseAdmin.from("processing_records").insert(records as never);
     if (rErr) {
       console.error("[seismic] record insert failed", rErr);
       throw new Error("Unable to save survey records");
