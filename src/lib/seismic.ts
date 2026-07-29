@@ -1,4 +1,9 @@
-import { supabase } from "@/integrations/supabase/client";
+import {
+  getAuditLogs,
+  getReports,
+  getSurveys,
+  recordAudit,
+} from "@/lib/seismic.functions";
 
 export type Corner = {
   lat: number | null;
@@ -70,37 +75,16 @@ export type AuditRow = {
   created_at: string;
 };
 
-const RECORD_COLUMNS =
-  "id,project_id,si_code,project_year,type_of_processing,quantum_skm,quantum_slkm,processing_bin,record_length,sampling_interval,fold,azimuth,spheroid,utm_zone,projection,project_timeline,centroid_lat,centroid_lon,bbox_min_lon,bbox_min_lat,bbox_max_lon,bbox_max_lat,corners,is_mapped,geometry_status,geometry_notes,flagged_for_review,projects(project_id,project_name,basin,project_type,data_dimension)";
-
 export async function fetchSurveys(): Promise<SurveyRecord[]> {
-  const { data, error } = await supabase
-    .from("processing_records")
-    .select(RECORD_COLUMNS)
-    .order("project_year", { ascending: false })
-    .order("project_id", { ascending: true });
-  if (error) throw error;
-  return (data ?? []) as unknown as SurveyRecord[];
+  return (await getSurveys()) as unknown as SurveyRecord[];
 }
 
 export async function fetchReports(): Promise<ReportRow[]> {
-  const { data, error } = await supabase
-    .from("project_reports")
-    .select("id,project_id,si_code,report_type,report_path,file_name");
-  if (error) throw error;
-  return (data ?? []) as ReportRow[];
+  return (await getReports()) as unknown as ReportRow[];
 }
 
 export async function fetchAuditLogs(basin?: string | null): Promise<AuditRow[]> {
-  let query = supabase
-    .from("audit_logs")
-    .select("id,user_session,action,project_id,si_code,basin,details,created_at")
-    .order("created_at", { ascending: false })
-    .limit(300);
-  if (basin) query = query.eq("basin", basin);
-  const { data, error } = await query;
-  if (error) throw error;
-  return (data ?? []) as AuditRow[];
+  return (await getAuditLogs({ data: { basin: basin ?? null } })) as unknown as AuditRow[];
 }
 
 /* ── Audit trail writer ─────────────────────────────────────────── */
@@ -135,13 +119,15 @@ export async function logAudit(
   } = {},
 ) {
   try {
-    await supabase.from("audit_logs").insert({
-      user_session: getSession(),
-      action,
-      project_id: payload.project_id ?? null,
-      si_code: payload.si_code ?? null,
-      basin: payload.basin ?? null,
-      details: (payload.details ?? {}) as never,
+    await recordAudit({
+      data: {
+        user_session: getSession(),
+        action,
+        project_id: payload.project_id ?? null,
+        si_code: payload.si_code ?? null,
+        basin: payload.basin ?? null,
+        details: payload.details ?? {},
+      },
     });
   } catch (err) {
     console.warn("audit log failed", err);
