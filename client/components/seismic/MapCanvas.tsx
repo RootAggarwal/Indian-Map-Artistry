@@ -154,6 +154,7 @@ export function MapCanvas({
       center: [82.5, 22.5],
       zoom: 4,
       attributionControl: false,
+      renderWorldCopies: false,
     })
 
     map.addControl(new NavigationControl({ showZoom: true, showCompass: false }), "bottom-right")
