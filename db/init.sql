@@ -1,3 +1,5 @@
+CREATE EXTENSION IF NOT EXISTS postgis;
+
 CREATE TABLE IF NOT EXISTS public.projects (
   project_id INT PRIMARY KEY,
   project_name TEXT NOT NULL,
@@ -35,8 +37,12 @@ CREATE TABLE IF NOT EXISTS public.processing_records (
   geometry_status TEXT,
   geometry_notes TEXT[] NOT NULL DEFAULT '{}',
   flagged_for_review BOOLEAN NOT NULL DEFAULT false,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  footprint geometry(Polygon, 4326),
+  centroid_geom geometry(Point, 4326)
 );
+
+CREATE INDEX IF NOT EXISTS idx_pr_footprint ON public.processing_records USING GIST (footprint);
 
 CREATE TABLE IF NOT EXISTS public.project_reports (
   id SERIAL PRIMARY KEY,
