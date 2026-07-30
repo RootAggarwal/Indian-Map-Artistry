@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useRef, useState } from "react";
-import { Upload, X, FileSpreadsheet, Loader2, Plus, Pencil, Trash2, Check, RotateCcw } from "lucide-react";
+import { Upload, X, FileSpreadsheet, Loader2, Plus, Pencil, Trash2, Check, RotateCcw, AlertTriangle } from "lucide-react";
 import type { SurveyDraft, SurveyRecord, SurveyUpdate } from "@/lib/seismic";
 
 type Props = {
@@ -9,6 +9,7 @@ type Props = {
   onSubmit: (drafts: SurveyDraft[]) => Promise<void>;
   onDelete: (id: number) => Promise<void>;
   onUpdate: (id: number, data: SurveyUpdate) => Promise<void>;
+  onClearAll: () => Promise<void>;
   surveys: SurveyRecord[];
   basins: string[];
 };
@@ -28,10 +29,13 @@ const EMPTY: SurveyDraft = {
   utm_zone: "",
   quantum_skm: null,
   quantum_slkm: null,
-  min_lon: null,
-  min_lat: null,
-  max_lon: null,
-  max_lat: null,
+  min_lon: null, min_lat: null, max_lon: null, max_lat: null,
+  g1_x: null, g1_y: null, g1_il: null, g1_xl: null,
+  g2_x: null, g2_y: null, g2_il: null, g2_xl: null,
+  g3_x: null, g3_y: null, g3_il: null, g3_xl: null,
+  g4_x: null, g4_y: null, g4_il: null, g4_xl: null,
+  record_length: null, sampling_interval: null, fold: null,
+  azimuth: null, spheroid: null, projection: null, project_timeline: null,
 };
 
 const num = (v: unknown) => {
@@ -49,29 +53,118 @@ function pick(row: Record<string, unknown>, ...names: string[]) {
   return undefined;
 }
 
+const G_NAMES = [
+  ["g1_x", "g1x", "corner1_x", "corner1easting", "corner1east", "easting1", "easting_1", "x1", "point1_x", "p1_x"],
+  ["g1_y", "g1y", "corner1_y", "corner1northing", "corner1north", "northing1", "northing_1", "y1", "point1_y", "p1_y"],
+  ["g1_il", "g1il", "corner1_il", "corner1inline", "inline1", "inline_1", "il1", "il_1", "point1_il", "p1_il"],
+  ["g1_xl", "g1xl", "corner1_xl", "corner1crossline", "crossline1", "crossline_1", "xl1", "xl_1", "point1_xl", "p1_xl"],
+  ["g2_x", "g2x", "corner2_x", "corner2easting", "corner2east", "easting2", "easting_2", "x2", "point2_x", "p2_x"],
+  ["g2_y", "g2y", "corner2_y", "corner2northing", "corner2north", "northing2", "northing_2", "y2", "point2_y", "p2_y"],
+  ["g2_il", "g2il", "corner2_il", "corner2inline", "inline2", "inline_2", "il2", "il_2", "point2_il", "p2_il"],
+  ["g2_xl", "g2xl", "corner2_xl", "corner2crossline", "crossline2", "crossline_2", "xl2", "xl_2", "point2_xl", "p2_xl"],
+  ["g3_x", "g3x", "corner3_x", "corner3easting", "corner3east", "easting3", "easting_3", "x3", "point3_x", "p3_x"],
+  ["g3_y", "g3y", "corner3_y", "corner3northing", "corner3north", "northing3", "northing_3", "y3", "point3_y", "p3_y"],
+  ["g3_il", "g3il", "corner3_il", "corner3inline", "inline3", "inline_3", "il3", "il_3", "point3_il", "p3_il"],
+  ["g3_xl", "g3xl", "corner3_xl", "corner3crossline", "crossline3", "crossline_3", "xl3", "xl_3", "point3_xl", "p3_xl"],
+  ["g4_x", "g4x", "corner4_x", "corner4easting", "corner4east", "easting4", "easting_4", "x4", "point4_x", "p4_x"],
+  ["g4_y", "g4y", "corner4_y", "corner4northing", "corner4north", "northing4", "northing_4", "y4", "point4_y", "p4_y"],
+  ["g4_il", "g4il", "corner4_il", "corner4inline", "inline4", "inline_4", "il4", "il_4", "point4_il", "p4_il"],
+  ["g4_xl", "g4xl", "corner4_xl", "corner4crossline", "crossline4", "crossline_4", "xl4", "xl_4", "point4_xl", "p4_xl"],
+] as const
+
 function rowToDraft(row: Record<string, unknown>): SurveyDraft | null {
   const name = str(pick(row, "project_name", "projectname", "name", "project"));
   if (!name) return null;
-  return {
+
+  const out: SurveyDraft = {
     project_name: name.slice(0, 200),
     basin: str(pick(row, "basin")),
     project_type: str(pick(row, "project_type", "type_of_project")),
     data_dimension: str(pick(row, "data_dimension", "dimension", "dim")) || null,
-    si_code: str(pick(row, "si_code", "sicode", "details_code", "code")),
+    si_code: str(pick(row,
+      "si_code", "sicode", "sig_code", "sigcode",
+      "details_code", "code", "sig", "si",
+      "s_i_code", "survey_id", "identifier", "signature_code",
+    )),
     project_year: str(pick(row, "project_year", "year")),
     type_of_processing: str(pick(row, "type_of_processing", "processing_type", "processing")),
     processing_bin: str(pick(row, "processing_bin", "bin")),
-    utm_zone: str(pick(row, "utm_zone", "utm")),
+    utm_zone: str(pick(row,
+      "utm_zone", "utm", "utm_zone_number",
+    )),
+    record_length: str(pick(row,
+      "record_length", "reclength", "recordlength", "rec_len", "reclen",
+      "record_len", "record length", "trace_length", "trclen",
+    )),
+    sampling_interval: str(pick(row,
+      "sampling_interval", "sampint", "samplingint", "sample_interval",
+      "sampleint", "samp_int", "si_ms", "sampling_rate", "samprate",
+    )),
+    fold: str(pick(row,
+      "fold", "nfold", "stack", "coverage", "nominal_fold",
+    )),
+    azimuth: str(pick(row,
+      "azimuth", "azi", "azm", "orientation", "direction",
+    )),
+    spheroid: str(pick(row,
+      "spheroid", "sph", "ellipsoid", "datum", "geodetic_datum",
+    )),
+    projection: str(pick(row,
+      "projection", "proj", "coord_sys", "coordinate_system", "map_projection",
+    )),
+    project_timeline: str(pick(row,
+      "project_timeline", "timeline", "plan_timeline", "planned_timeline",
+      "actual_timeline", "proj_timeline", "schedule",
+    )),
     quantum_skm: num(pick(row, "quantum_skm", "skm")),
     quantum_slkm: num(pick(row, "quantum_slkm", "slkm")),
-    min_lon: num(pick(row, "min_lon", "minlon", "west", "lon1", "x1")),
-    min_lat: num(pick(row, "min_lat", "minlat", "south", "lat1", "y1")),
-    max_lon: num(pick(row, "max_lon", "maxlon", "east", "lon2", "x2")),
-    max_lat: num(pick(row, "max_lat", "maxlat", "north", "lat2", "y2")),
-  };
+    min_lon: num(
+      pick(row,
+        "min_lon", "minlon", "lonmin", "lon_min",
+        "west", "westlon", "west_longitude", "westlong", "w_lon", "w_long",
+        "lon1", "x1", "xmin", "minx", "x_min", "min_x",
+        "from_lon", "start_lon", "lon_from", "lon_start",
+        "left_lon", "left",
+        "min_longitude", "minlongitude", "minimum_lon", "minimum_longitude",
+      )),
+    min_lat: num(
+      pick(row,
+        "min_lat", "minlat", "latmin", "lat_min",
+        "south", "southlat", "south_latitude", "s_lat", "s_lat",
+        "lat1", "y1", "ymin", "miny", "y_min", "min_y",
+        "from_lat", "start_lat", "lat_from", "lat_start",
+        "bottom_lat", "bottom",
+        "min_latitude", "minlatitude", "minimum_lat", "minimum_latitude",
+      )),
+    max_lon: num(
+      pick(row,
+        "max_lon", "maxlon", "lonmax", "lon_max",
+        "east", "eastlon", "east_longitude", "eastlong", "e_lon", "e_long",
+        "lon2", "x2", "xmax", "maxx", "x_max", "max_x",
+        "to_lon", "end_lon", "lon_to", "lon_end",
+        "right_lon", "right",
+        "max_longitude", "maxlongitude", "maximum_lon", "maximum_longitude",
+      )),
+    max_lat: num(
+      pick(row,
+        "max_lat", "maxlat", "latmax", "lat_max",
+        "north", "northlat", "north_latitude", "n_lat", "n_lat",
+        "lat2", "y2", "ymax", "maxy", "y_max", "max_y",
+        "to_lat", "end_lat", "lat_to", "lat_end",
+        "top_lat", "top",
+        "max_latitude", "maxlatitude", "maximum_lat", "maximum_latitude",
+      )),
+  }
+
+  for (const [field, ...aliases] of G_NAMES) {
+    const v = num(pick(row, field, ...aliases));
+    if (v != null) (out as any)[field] = v;
+  }
+
+  return out;
 }
 
-export function AddSurveyDialog({ open, onClose, onSubmit, onDelete, onUpdate, surveys, basins }: Props) {
+export function AddSurveyDialog({ open, onClose, onSubmit, onDelete, onUpdate, onClearAll, surveys, basins }: Props) {
   const [mode, setMode] = useState<"manual" | "import" | "manage">("manual");
   const [draft, setDraft] = useState<SurveyDraft>(EMPTY);
   const [queued, setQueued] = useState<SurveyDraft[]>([]);
@@ -83,6 +176,7 @@ export function AddSurveyDialog({ open, onClose, onSubmit, onDelete, onUpdate, s
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editData, setEditData] = useState<SurveyUpdate>({});
   const [deletingId, setDeletingId] = useState<number | null>(null);
+  const [confirmClear, setConfirmClear] = useState(false);
 
   const set = <K extends keyof SurveyDraft>(k: K, v: SurveyDraft[K]) =>
     setDraft((d) => ({ ...d, [k]: v }));
@@ -99,6 +193,31 @@ export function AddSurveyDialog({ open, onClose, onSubmit, onDelete, onUpdate, s
           const wb = XLSX.read(await file.arrayBuffer(), { type: "array" });
           for (const sheet of wb.SheetNames) {
             const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(wb.Sheets[sheet]);
+            if (rows.length > 0) {
+              const colList = Object.keys(rows[0]);
+              const known = new Set<string>();
+              const allPatterns = [
+                "project_name", "basin", "si_code", "project_year",
+                "g1_x", "g1_y", "g1_il", "g1_xl",
+                "min_lon", "min_lat", "max_lon", "max_lat",
+              ];
+              for (const pat of allPatterns) {
+                const kp = KEY(pat);
+                for (const c of colList) {
+                  const nc = KEY(c);
+                  if (nc === kp || nc.includes(kp)) known.add(c);
+                }
+              }
+              const foundCols = colList.filter((c) => known.has(c));
+              const hasCoords = foundCols.some((c) =>
+                ["g1_x", "g1_y", "g1_il", "g1_xl", "min_lon", "min_lat", "max_lon", "max_lat"]
+                  .some((p) => KEY(c) === KEY(p) || KEY(c).includes(KEY(p)))
+              );
+              if (!hasCoords) {
+                setMessage(`Sheet "${sheet}" columns: ${colList.join(", ")} — no coordinate columns matched`);
+              }
+              console.log("[import] Sheet:", sheet, "Columns:", colList.join(", "), "Matched:", foundCols);
+            }
             rows.forEach((r) => {
               const d = rowToDraft(r);
               if (d) found.push(d);
@@ -294,6 +413,55 @@ export function AddSurveyDialog({ open, onClose, onSubmit, onDelete, onUpdate, s
                   onChange={(e) => set("quantum_slkm", num(e.target.value))}
                 />
               </Labeled>
+              <Labeled label="Record length">
+                <input
+                  className={field}
+                  value={draft.record_length ?? ""}
+                  onChange={(e) => set("record_length", e.target.value)}
+                />
+              </Labeled>
+              <Labeled label="Sampling interval">
+                <input
+                  className={field}
+                  value={draft.sampling_interval ?? ""}
+                  onChange={(e) => set("sampling_interval", e.target.value)}
+                />
+              </Labeled>
+              <Labeled label="Fold">
+                <input
+                  className={field}
+                  value={draft.fold ?? ""}
+                  onChange={(e) => set("fold", e.target.value)}
+                />
+              </Labeled>
+              <Labeled label="Azimuth">
+                <input
+                  className={field}
+                  value={draft.azimuth ?? ""}
+                  onChange={(e) => set("azimuth", e.target.value)}
+                />
+              </Labeled>
+              <Labeled label="Spheroid">
+                <input
+                  className={field}
+                  value={draft.spheroid ?? ""}
+                  onChange={(e) => set("spheroid", e.target.value)}
+                />
+              </Labeled>
+              <Labeled label="Projection">
+                <input
+                  className={field}
+                  value={draft.projection ?? ""}
+                  onChange={(e) => set("projection", e.target.value)}
+                />
+              </Labeled>
+              <Labeled label="Project timeline">
+                <input
+                  className={field}
+                  value={draft.project_timeline ?? ""}
+                  onChange={(e) => set("project_timeline", e.target.value)}
+                />
+              </Labeled>
 
               <div className="sm:col-span-2">
                 <p className="rail-label mb-2">
@@ -423,6 +591,27 @@ export function AddSurveyDialog({ open, onClose, onSubmit, onDelete, onUpdate, s
                           <Labeled label="SLKM">
                             <input className={field} inputMode="decimal" value={editData.quantum_slkm ?? s.quantum_slkm ?? ""} onChange={(e) => setEditData((d) => ({ ...d, quantum_slkm: parseFloat(e.target.value) || null }))} />
                           </Labeled>
+                          <Labeled label="Record length">
+                            <input className={field} value={editData.record_length ?? s.record_length ?? ""} onChange={(e) => setEditData((d) => ({ ...d, record_length: e.target.value || null }))} />
+                          </Labeled>
+                          <Labeled label="Sampling interval">
+                            <input className={field} value={editData.sampling_interval ?? s.sampling_interval ?? ""} onChange={(e) => setEditData((d) => ({ ...d, sampling_interval: e.target.value || null }))} />
+                          </Labeled>
+                          <Labeled label="Fold">
+                            <input className={field} value={editData.fold ?? s.fold ?? ""} onChange={(e) => setEditData((d) => ({ ...d, fold: e.target.value || null }))} />
+                          </Labeled>
+                          <Labeled label="Azimuth">
+                            <input className={field} value={editData.azimuth ?? s.azimuth ?? ""} onChange={(e) => setEditData((d) => ({ ...d, azimuth: e.target.value || null }))} />
+                          </Labeled>
+                          <Labeled label="Spheroid">
+                            <input className={field} value={editData.spheroid ?? s.spheroid ?? ""} onChange={(e) => setEditData((d) => ({ ...d, spheroid: e.target.value || null }))} />
+                          </Labeled>
+                          <Labeled label="Projection">
+                            <input className={field} value={editData.projection ?? s.projection ?? ""} onChange={(e) => setEditData((d) => ({ ...d, projection: e.target.value || null }))} />
+                          </Labeled>
+                          <Labeled label="Project timeline">
+                            <input className={field} value={editData.project_timeline ?? s.project_timeline ?? ""} onChange={(e) => setEditData((d) => ({ ...d, project_timeline: e.target.value || null }))} />
+                          </Labeled>
                           <div className="flex items-end gap-2 sm:col-span-2">
                             <button
                               onClick={async () => {
@@ -492,6 +681,42 @@ export function AddSurveyDialog({ open, onClose, onSubmit, onDelete, onUpdate, s
                   <p className="px-4 py-8 text-center text-[0.78rem] text-muted-foreground">No surveys loaded.</p>
                 )}
               </div>
+              {confirmClear ? (
+                <div className="mt-3 flex items-center gap-3 border border-rust bg-rust/10 px-4 py-3">
+                  <AlertTriangle className="h-4 w-4 shrink-0 text-rust" />
+                  <p className="flex-1 text-[0.78rem] text-foreground/90">
+                    Delete all <span className="font-semibold text-rust">{surveys.length}</span> surveys? This cannot be undone.
+                  </p>
+                  <button
+                    onClick={async () => {
+                      setBusy(true)
+                      try {
+                        await onClearAll()
+                        setConfirmClear(false)
+                      } finally {
+                        setBusy(false)
+                      }
+                    }}
+                    className="rail-label border border-rust bg-rust px-3 py-1 text-primary-foreground"
+                  >
+                    Yes, clear all
+                  </button>
+                  <button
+                    onClick={() => setConfirmClear(false)}
+                    className="rail-label border border-border px-3 py-1"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              ) : surveys.length > 0 && (
+                <button
+                  onClick={() => setConfirmClear(true)}
+                  className="mt-3 flex w-full items-center justify-center gap-2 border border-rust/50 px-3 py-2 text-[0.72rem] font-semibold uppercase tracking-[0.14em] text-rust transition-colors hover:bg-rust hover:text-primary-foreground"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                  Clear all data ({surveys.length})
+                </button>
+              )}
             </div>
           )}
 

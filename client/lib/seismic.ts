@@ -48,6 +48,24 @@ export type SurveyRecord = {
   geometry_notes: string[]
   flagged_for_review: boolean
   projects: ProjectRow | null
+  footprint_geojson: string | null
+  centroid_geojson: string | null
+  g1_x: number | null
+  g1_y: number | null
+  g1_il: number | null
+  g1_xl: number | null
+  g2_x: number | null
+  g2_y: number | null
+  g2_il: number | null
+  g2_xl: number | null
+  g3_x: number | null
+  g3_y: number | null
+  g3_il: number | null
+  g3_xl: number | null
+  g4_x: number | null
+  g4_y: number | null
+  g4_il: number | null
+  g4_xl: number | null
 }
 
 export type ReportRow = {
@@ -86,6 +104,29 @@ export type SurveyDraft = {
   min_lat?: number | null
   max_lon?: number | null
   max_lat?: number | null
+  g1_x?: number | null
+  g1_y?: number | null
+  g1_il?: number | null
+  g1_xl?: number | null
+  g2_x?: number | null
+  g2_y?: number | null
+  g2_il?: number | null
+  g2_xl?: number | null
+  g3_x?: number | null
+  g3_y?: number | null
+  g3_il?: number | null
+  g3_xl?: number | null
+  g4_x?: number | null
+  g4_y?: number | null
+  g4_il?: number | null
+  g4_xl?: number | null
+  record_length?: string | null
+  sampling_interval?: string | null
+  fold?: string | null
+  azimuth?: string | null
+  spheroid?: string | null
+  projection?: string | null
+  project_timeline?: string | null
 }
 
 export async function fetchSurveys(): Promise<SurveyRecord[]> {
@@ -115,6 +156,10 @@ export async function deleteSurvey(id: number): Promise<{ removed: number }> {
   return api.del(`/surveys/${id}`)
 }
 
+export async function clearAllSurveys(): Promise<{ removed: number }> {
+  return api.del("/surveys")
+}
+
 export type SurveyUpdate = {
   si_code?: string | null
   project_year?: string | null
@@ -123,14 +168,45 @@ export type SurveyUpdate = {
   quantum_slkm?: number | null
   processing_bin?: string | null
   utm_zone?: string | null
+  record_length?: string | null
+  sampling_interval?: string | null
+  fold?: string | null
+  azimuth?: string | null
+  spheroid?: string | null
+  projection?: string | null
+  project_timeline?: string | null
   project_name?: string
   basin?: string | null
   project_type?: string | null
   data_dimension?: string | null
+  corners?: Corner[]
+  g1_x?: number | null
+  g1_y?: number | null
+  g1_il?: number | null
+  g1_xl?: number | null
+  g2_x?: number | null
+  g2_y?: number | null
+  g2_il?: number | null
+  g2_xl?: number | null
+  g3_x?: number | null
+  g3_y?: number | null
+  g3_il?: number | null
+  g3_xl?: number | null
+  g4_x?: number | null
+  g4_y?: number | null
+  g4_il?: number | null
+  g4_xl?: number | null
+  geometry_status?: string | null
+  geometry_notes?: string[]
+  flagged_for_review?: boolean
 }
 
 export async function updateSurvey(id: number, data: SurveyUpdate): Promise<{ updated: number }> {
   return api.put(`/surveys/${id}`, data)
+}
+
+export async function reprocessSurveys(): Promise<{ reprocessed: number; errors: number }> {
+  return api.post("/surveys/reprocess", {})
 }
 
 export type AuditAction =

@@ -2,29 +2,31 @@
 
 import { useEffect, useMemo, useRef, useState } from "react"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
-import { Activity, Info, RotateCcw, X } from "lucide-react"
+import { Activity, Info, RotateCcw, X, Palette, PanelLeftClose, PanelRightClose, PanelBottomClose } from "lucide-react"
 import {
   counts,
-  fetchAuditLogs,
   fetchReports,
   fetchSurveys,
   logAudit,
   deleteSurvey,
+  clearAllSurveys,
   rollbackSurveys,
   saveSurveys,
   updateSurvey,
+  reprocessSurveys,
   type SurveyDraft,
   type SurveyRecord,
   type SurveyUpdate,
 } from "@/lib/seismic"
-import { buildProjectReport } from "@/lib/report-pdf"
 import { FilterRail, type FacetKey } from "@/components/seismic/FilterRail"
-import { MapCanvas, type MapTool } from "@/components/seismic/MapCanvas"
+import { MapCanvas } from "@/components/seismic/MapCanvas"
 import { RibbonBar } from "@/components/seismic/RibbonBar"
 import { EntityPanel } from "@/components/seismic/EntityPanel"
 import { BottomBar } from "@/components/seismic/BottomBar"
 import { DetailsDialog } from "@/components/seismic/DetailsDialog"
 import { AddSurveyDialog } from "@/components/seismic/AddSurveyDialog"
+import { useTheme, type ThemeId } from "@/contexts/theme"
+import type { MapTool, ViewMode } from "@/components/seismic/types"
 
 const EMPTY: Record<FacetKey, string[]> = {
   basin: [],
@@ -33,6 +35,15 @@ const EMPTY: Record<FacetKey, string[]> = {
   project_year: [],
   type_of_processing: [],
 }
+
+const THEMES: { id: ThemeId; label: string; group: string }[] = [
+  { id: "graphite", label: "Graphite", group: "Dark" },
+  { id: "midnight", label: "Midnight", group: "Dark" },
+  { id: "slate", label: "Slate", group: "Dark" },
+  { id: "paper", label: "Paper", group: "Light" },
+  { id: "ivory", label: "Ivory", group: "Light" },
+  { id: "classic", label: "Classic GIS", group: "Light" },
+]
 
 function facetValue(rec: SurveyRecord, key: FacetKey) {
   if (key === "basin") return rec.projects?.basin ?? "Unspecified"
@@ -44,6 +55,7 @@ function facetValue(rec: SurveyRecord, key: FacetKey) {
 
 export default function Dashboard() {
   const queryClient = useQueryClient()
+  const { theme, setTheme, isDark } = useTheme()
   const surveys = useQuery({ queryKey: ["surveys"], queryFn: fetchSurveys })
   const reports = useQuery({ queryKey: ["reports"], queryFn: fetchReports })
 
@@ -58,6 +70,11 @@ export default function Dashboard() {
   const [query, setQuery] = useState("")
   const [addOpen, setAddOpen] = useState(false)
   const [lastImport, setLastImport] = useState<{ project_ids: number[]; count: number; mapped: number } | null>(null)
+  const [sidebarOpen, setSidebarOpen] = useState(true)
+  const [detailsOpen, setDetailsOpen] = useState(true)
+  const [bottomOpen, setBottomOpen] = useState(true)
+  const [themeMenuOpen, setThemeMenuOpen] = useState(false)
+  const [viewMode, setViewMode] = useState<ViewMode>("3d")
   const nonce = useRef(0)
 
   const all = surveys.data ?? []
@@ -142,14 +159,33 @@ export default function Dashboard() {
 
   async function printReport(rec: SurveyRecord | null) {
     if (!rec) return
-    const audit = await fetchAuditLogs(rec.projects?.basin ?? null).catch(() => [])
-    buildProjectReport(rec, reports.data ?? [], audit)
-    void logAudit("REPORT_EXPORTED", {
-      project_id: rec.project_id,
-      si_code: rec.si_code,
-      basin: rec.projects?.basin ?? null,
-      details: { format: "pdf" },
-    })
+    try {
+      const base = (process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000/api").replace(/\/api\/?$/, "")
+      const resp = await fetch(`${base}/api/surveys/${rec.id}/pdf`)
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}))
+        throw new Error((err as any).error || `HTTP ${resp.status}`)
+      }
+      const blob = await resp.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement("a")
+      a.href = url
+      const disposition = resp.headers.get("Content-Disposition") || ""
+      const m = disposition.match(/filename="?(.+?)"?$/)
+      a.download = m ? m[1] : `seismic-dossier-${rec.project_id}.pdf`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
+      void logAudit("REPORT_EXPORTED", {
+        project_id: rec.project_id,
+        si_code: rec.si_code,
+        basin: rec.projects?.basin ?? null,
+        details: { format: "pdf" },
+      })
+    } catch (err) {
+      console.error("[print] PDF failed:", err)
+    }
   }
 
   async function handleAdd(drafts: SurveyDraft[]) {
@@ -180,30 +216,85 @@ export default function Dashboard() {
 
   return (
     <main className="flex h-screen min-h-0 flex-col bg-background text-foreground">
-      <header className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-4 border-b border-border bg-ink px-4 py-3 sm:px-6">
-        <div className="flex min-w-0 items-center gap-3">
-          <span className="grid h-9 w-9 shrink-0 place-items-center border border-ochre/60 bg-ochre/10">
-            <Activity className="h-4 w-4 text-ochre" />
-          </span>
-          <div className="min-w-0">
-            <h1 className="slab truncate text-lg leading-none text-foreground sm:text-xl">
-              Seismic Data Processing
-            </h1>
-            <p className="rail-label mt-1 truncate">
-              GEOPIC · India survey atlas · {all.length} records
-            </p>
-          </div>
+      <header className="flex items-center gap-3 border-b border-border bg-ink px-4 py-2 sm:px-6">
+        <span className="grid h-8 w-8 shrink-0 place-items-center border border-ochre/60 bg-ochre/10">
+          <Activity className="h-4 w-4 text-ochre" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <h1 className="slab truncate text-base leading-none text-foreground sm:text-lg">
+            Seismic Data Processing
+          </h1>
+          <p className="rail-label mt-0.5 truncate">
+            GEOPIC · India survey atlas · {all.length} records
+          </p>
         </div>
-        <div className="hidden shrink-0 items-center gap-4 md:flex">
+        <div className="hidden items-center gap-3 md:flex">
           <Stat label="Mapped" value={`${mappedCount}`} />
           <Stat label="Adjusted" value={`${adjusted}`} />
-          <Stat label="Timeline" value={years[yearIndex] ?? "ALL"} />
+          <Stat label="Year" value={years[yearIndex] ?? "ALL"} />
+          <span className="h-5 w-px bg-border" />
+          <div className="relative">
+            <button
+              onClick={() => setThemeMenuOpen(!themeMenuOpen)}
+              className="grid h-8 w-8 place-items-center border border-border text-muted-foreground transition-colors hover:border-ochre hover:text-ochre"
+              title="Change theme"
+              aria-label="Change theme"
+            >
+              <Palette className="h-4 w-4" />
+            </button>
+            {themeMenuOpen && (
+              <>
+                <div className="fixed inset-0 z-40" onClick={() => setThemeMenuOpen(false)} />
+                <div className="absolute right-0 top-full z-50 mt-1 w-40 border border-border bg-popover shadow-lg">
+                  {(["Dark", "Light"] as const).map((group) => (
+                    <div key={group}>
+                      <p className="rail-label px-3 pt-2 pb-1">{group}</p>
+                      {THEMES.filter((t) => t.group === group).map((t) => (
+                        <button
+                          key={t.id}
+                          onClick={() => { setTheme(t.id); setThemeMenuOpen(false) }}
+                          className={`flex w-full items-center gap-2 px-3 py-1.5 text-[0.72rem] text-left transition-colors ${
+                            theme === t.id
+                              ? "bg-ochre/15 text-ochre"
+                              : "text-foreground hover:bg-surface-2"
+                          }`}
+                        >
+                          <span className={`h-3 w-3 rounded-full border ${
+                            t.id === "graphite" ? "bg-gray-700" :
+                            t.id === "midnight" ? "bg-indigo-900" :
+                            t.id === "slate" ? "bg-slate-600" :
+                            t.id === "paper" ? "bg-amber-100" :
+                            t.id === "ivory" ? "bg-yellow-50" :
+                            "bg-blue-200"
+                          }`} />
+                          {t.label}
+                        </button>
+                      ))}
+                    </div>
+                  ))}
+                  <div className="border-t border-border mt-1 pt-1 pb-1">
+                    <button
+                      onClick={async () => {
+                        await reprocessSurveys()
+                        await queryClient.invalidateQueries({ queryKey: ["surveys"] })
+                        setThemeMenuOpen(false)
+                      }}
+                      className="flex w-full items-center gap-2 px-3 py-1.5 text-[0.72rem] text-left text-foreground hover:bg-surface-2 transition-colors"
+                    >
+                      <RotateCcw className="h-3 w-3" />
+                      Reprocess geometry
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
         </div>
       </header>
 
-      <div className="grid min-h-0 flex-1 grid-rows-[1fr_auto] lg:grid-rows-[minmax(0,1.45fr)_minmax(0,1fr)]">
-        <div className="grid min-h-0 grid-cols-1 lg:grid-cols-[15rem_minmax(0,1fr)_20rem]">
-          <div className="hidden min-h-0 lg:block">
+      <div className="flex min-h-0 flex-1">
+        {sidebarOpen && (
+          <aside className="hidden w-60 shrink-0 border-r border-border bg-surface lg:block">
             <FilterRail
               facets={facets}
               selected={selected}
@@ -215,103 +306,113 @@ export default function Dashboard() {
               total={all.length}
               shown={filtered.length}
             />
-          </div>
+          </aside>
+        )}
 
-          <section className="flex min-h-0 min-w-0 flex-col">
-            <RibbonBar
-              tool={tool}
-              setTool={(t) => {
-                setTool(t)
-                void logAudit("MAP_TOOL_USED", { details: { tool: t } })
-              }}
-              onZoom={(dir) => {
-                nonce.current += 1
-                setZoomSignal({ dir, nonce: nonce.current })
-              }}
-              onReset={() => setResetSignal((v) => v + 1)}
-              onPrint={() => void printReport(activeRec ?? filtered[0] ?? null)}
-              years={years}
-              yearIndex={yearIndex}
-              setYearIndex={setYearIndex}
-              playing={playing}
-              togglePlay={() => {
-                setPlaying((p) => !p)
-                void logAudit("TIMELINE_PLAYED")
-              }}
-              query={query}
-              setQuery={setQuery}
-              matches={filtered.length}
-              onAdd={() => setAddOpen(true)}
-            />
-            <div className="min-h-[18rem] flex-1">
+        <section className="flex min-w-0 flex-1 flex-col">
+          <RibbonBar
+            tool={tool}
+            setTool={(t) => {
+              setTool(t)
+              void logAudit("MAP_TOOL_USED", { details: { tool: t } })
+            }}
+            onZoom={(dir) => {
+              nonce.current += 1
+              setZoomSignal({ dir, nonce: nonce.current })
+            }}
+            onReset={() => setResetSignal((v) => v + 1)}
+            onPrint={() => void printReport(activeRec ?? filtered[0] ?? null)}
+            years={years}
+            yearIndex={yearIndex}
+            setYearIndex={setYearIndex}
+            playing={playing}
+            togglePlay={() => {
+              setPlaying((p) => !p)
+              void logAudit("TIMELINE_PLAYED")
+            }}
+            query={query}
+            setQuery={setQuery}
+            matches={filtered.length}
+            onAdd={() => setAddOpen(true)}
+            sidebarOpen={sidebarOpen}
+            detailsOpen={detailsOpen}
+            bottomOpen={bottomOpen}
+            onToggleSidebar={() => setSidebarOpen((o) => !o)}
+            onToggleDetails={() => setDetailsOpen((o) => !o)}
+            onToggleBottom={() => setBottomOpen((o) => !o)}
+          />
+          <div className="flex min-h-0 flex-1">
+            <div className="min-w-0 flex-1">
               <MapCanvas
                 surveys={filtered}
                 selectedId={activeId}
                 onSelect={selectRec}
-                tool={tool}
                 zoomSignal={zoomSignal}
                 resetSignal={resetSignal}
                 yearFilterActive={timelineYear}
+                viewMode={viewMode}
+                onViewModeChange={setViewMode}
               />
             </div>
-            {adjusted > 0 && (
-              <p className="flex items-start gap-2 border-t border-border bg-rust/10 px-3 py-2 text-[0.7rem] leading-snug text-foreground/85">
-                <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-rust" />
-                {adjusted} footprint{adjusted > 1 ? "s" : ""} in view carry a cartographic note — squared to an
-                axis-aligned box and/or clipped to the Indian boundary. Footprints outlined in dashed
-                rust have an implausibly large extent in the source data and should be verified.
-              </p>
+            {detailsOpen && (
+              <aside className="hidden w-72 shrink-0 border-l border-border bg-surface lg:block">
+                <EntityPanel
+                  rec={activeRec}
+                  reports={reports.data ?? []}
+                  onPrint={() => void printReport(activeRec)}
+                  onOpenDetails={() => {
+                    setDialogRec(activeRec)
+                    void logAudit("DETAILS_OPENED", { project_id: activeRec?.project_id ?? null })
+                  }}
+                />
+              </aside>
             )}
-          </section>
-
-          <div className="hidden min-h-0 lg:block">
-            <EntityPanel
-              rec={activeRec}
-              reports={reports.data ?? []}
-              onPrint={() => void printReport(activeRec)}
-              onOpenDetails={() => {
-                setDialogRec(activeRec)
-                void logAudit("DETAILS_OPENED", { project_id: activeRec?.project_id ?? null })
-              }}
-            />
           </div>
-        </div>
-
-        <div className="min-h-[13rem] lg:min-h-0">
-          <BottomBar
-            rows={filtered}
-            selectedId={activeId}
-            onSelect={selectRec}
-            onMore={(rec) => {
-              selectRec(rec)
-              setDialogRec(rec)
-            }}
-          />
-        </div>
-
-        {lastImport && (
-          <div className="flex items-center gap-3 border-t border-seismic/40 bg-seismic/10 px-4 py-2">
-            <RotateCcw className="h-4 w-4 shrink-0 text-seismic" />
-            <p className="min-w-0 flex-1 truncate text-[0.75rem] text-foreground/90">
-              Imported {lastImport.count} survey{lastImport.count > 1 ? "s" : ""}
-              {lastImport.mapped > 0 ? ` · ${lastImport.mapped} with geometry` : ""}
+          {adjusted > 0 && (
+            <p className="flex items-start gap-2 border-t border-border bg-rust/10 px-3 py-2 text-[0.7rem] leading-snug text-foreground/85">
+              <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-rust" />
+              {adjusted} footprint{adjusted > 1 ? "s" : ""} in view carry a cartographic note — squared to an
+              axis-aligned box and/or clipped to the Indian boundary.
             </p>
-            <button
-              onClick={handleRollback}
-              className="rail-label shrink-0 border border-seismic/60 px-3 py-1 text-seismic transition-colors hover:bg-seismic hover:text-primary-foreground"
-            >
-              Undo
-            </button>
-            <button
-              onClick={() => setLastImport(null)}
-              className="grid h-6 w-6 shrink-0 place-items-center text-muted-foreground transition-colors hover:text-rust"
-              aria-label="Dismiss"
-            >
-              <X className="h-3.5 w-3.5" />
-            </button>
-          </div>
-        )}
+          )}
+          {bottomOpen && (
+            <div className="h-48 shrink-0 border-t border-border lg:h-44">
+              <BottomBar
+                rows={filtered}
+                selectedId={activeId}
+                onSelect={selectRec}
+                onMore={(rec) => {
+                  selectRec(rec)
+                  setDialogRec(rec)
+                }}
+              />
+            </div>
+          )}
+        </section>
       </div>
+
+      {lastImport && (
+        <div className="flex items-center gap-3 border-t border-seismic/40 bg-seismic/10 px-4 py-2">
+          <RotateCcw className="h-4 w-4 shrink-0 text-seismic" />
+          <p className="min-w-0 flex-1 truncate text-[0.75rem] text-foreground/90">
+            Imported {lastImport.count} survey{lastImport.count > 1 ? "s" : ""}
+            {lastImport.mapped > 0 ? ` · ${lastImport.mapped} with geometry` : ""}
+          </p>
+          <button
+            onClick={handleRollback}
+            className="rail-label shrink-0 border border-seismic/60 px-3 py-1 text-seismic transition-colors hover:bg-seismic hover:text-primary-foreground"
+          >
+            Undo
+          </button>
+          <button
+            onClick={() => setLastImport(null)}
+            className="grid h-6 w-6 shrink-0 place-items-center text-muted-foreground transition-colors hover:text-rust"
+            aria-label="Dismiss"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
 
       <AddSurveyDialog
         open={addOpen}
@@ -323,6 +424,10 @@ export default function Dashboard() {
         }}
         onUpdate={async (id, data) => {
           await updateSurvey(id, data)
+          await queryClient.invalidateQueries({ queryKey: ["surveys"] })
+        }}
+        onClearAll={async () => {
+          await clearAllSurveys()
           await queryClient.invalidateQueries({ queryKey: ["surveys"] })
         }}
         surveys={all}

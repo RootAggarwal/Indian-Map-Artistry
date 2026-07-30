@@ -1,243 +1,405 @@
-"use client";
-import { useEffect, useMemo, useRef, useState } from "react";
-import type { SurveyRecord } from "@/lib/seismic";
+"use client"
 
-export type MapTool = "pan" | "box" | "inspect";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react"
+import { Map as MaplibreMap, NavigationControl, Popup, LngLatBounds } from "maplibre-gl"
+import type { GeoJSONSource } from "maplibre-gl"
+import type { SurveyRecord } from "@/lib/seismic"
+import { useTheme } from "@/contexts/theme"
+import { MapToolbar } from "./MapToolbar"
+import type { ViewMode } from "./types"
 
 type Props = {
-  surveys: SurveyRecord[];
-  selectedId: number | null;
-  onSelect: (rec: SurveyRecord) => void;
-  tool: MapTool;
-  zoomSignal: { dir: number; nonce: number } | null;
-  resetSignal: number;
-  yearFilterActive: string | null;
-};
+  surveys: SurveyRecord[]
+  selectedId: number | null
+  onSelect: (rec: SurveyRecord) => void
+  zoomSignal: { dir: number; nonce: number } | null
+  resetSignal: number
+  yearFilterActive: string | null
+  viewMode: ViewMode
+  onViewModeChange: (v: ViewMode) => void
+}
 
-/* Equirectangular projection tuned to the Indian national extent. */
-const LON0 = 67.5;
-const LON1 = 98.0;
-const LAT0 = 5.5;
-const LAT1 = 38.0;
-const K = 40; // px per degree of longitude
-const KX = K;
-const KY = K * 1.08;
-const VIEW_W = (LON1 - LON0) * KX;
-const VIEW_H = (LAT1 - LAT0) * KY;
-
-const px = (lon: number) => (lon - LON0) * KX;
-const py = (lat: number) => (LAT1 - lat) * KY;
-
-type Boundary = { type: string; coordinates: number[][][][] };
+function makeBaseStyle(isDark: boolean): any {
+  return {
+    version: 8,
+    sources: {},
+    layers: [
+      {
+        id: "background",
+        type: "background",
+        paint: {
+          "background-color": isDark ? "#0f172a" : "#f8fafc",
+        },
+      },
+    ],
+  }
+}
 
 export function MapCanvas({
   surveys,
   selectedId,
   onSelect,
-  tool,
   zoomSignal,
   resetSignal,
-  yearFilterActive,
+  viewMode,
+  onViewModeChange,
 }: Props) {
-  const [boundary, setBoundary] = useState<Boundary | null>(null);
-  const [view, setView] = useState({ x: 0, y: 0, w: VIEW_W, h: VIEW_H });
-  const [drag, setDrag] = useState<null | { sx: number; sy: number; view: typeof view }>(null);
-  const [box, setBox] = useState<null | { x1: number; y1: number; x2: number; y2: number }>(null);
-  const [hover, setHover] = useState<SurveyRecord | null>(null);
-  const svgRef = useRef<SVGSVGElement | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null)
+  const mapRef = useRef<MaplibreMap | null>(null)
+  const popupRef = useRef<Popup | null>(null)
+  const [mapReady, setMapReady] = useState(false)
+  const { isDark } = useTheme()
 
-  useEffect(() => {
-    fetch("/data/india-boundary.json")
-      .then((r) => r.json())
-      .then(setBoundary)
-      .catch(() => setBoundary(null));
-  }, []);
-
-  useEffect(() => {
-    if (!zoomSignal) return;
-    setView((v) => {
-      const factor = zoomSignal.dir > 0 ? 0.72 : 1 / 0.72;
-      const w = Math.min(VIEW_W * 1.2, Math.max(VIEW_W * 0.06, v.w * factor));
-      const h = w * (VIEW_H / VIEW_W);
-      return { x: v.x + (v.w - w) / 2, y: v.y + (v.h - h) / 2, w, h };
-    });
-  }, [zoomSignal]);
-
-  useEffect(() => {
-    if (resetSignal) setView({ x: 0, y: 0, w: VIEW_W, h: VIEW_H });
-  }, [resetSignal]);
-
-  const paths = useMemo(() => {
-    if (!boundary) return [];
-    return boundary.coordinates.map((poly) =>
-      poly
-        .map(
-          (ring) =>
-            ring.map(([lon, lat], i) => `${i ? "L" : "M"}${px(lon).toFixed(1)},${py(lat).toFixed(1)}`).join("") + "Z",
-        )
-        .join(" "),
-    );
-  }, [boundary]);
-
-  const mapped = useMemo(() => surveys.filter((s) => s.is_mapped && s.bbox_min_lon != null), [surveys]);
-
-  function toLocal(e: React.MouseEvent) {
-    const svg = svgRef.current;
-    if (!svg) return { x: 0, y: 0 };
-    const rect = svg.getBoundingClientRect();
-    return {
-      x: view.x + ((e.clientX - rect.left) / rect.width) * view.w,
-      y: view.y + ((e.clientY - rect.top) / rect.height) * view.h,
-    };
-  }
-
-  function onDown(e: React.MouseEvent) {
-    const p = toLocal(e);
-    if (tool === "box") setBox({ x1: p.x, y1: p.y, x2: p.x, y2: p.y });
-    else if (tool === "pan") setDrag({ sx: e.clientX, sy: e.clientY, view });
-  }
-
-  function onMove(e: React.MouseEvent) {
-    if (box) {
-      const p = toLocal(e);
-      setBox((b) => (b ? { ...b, x2: p.x, y2: p.y } : b));
-      return;
-    }
-    if (drag && svgRef.current) {
-      const rect = svgRef.current.getBoundingClientRect();
-      const dx = ((e.clientX - drag.sx) / rect.width) * drag.view.w;
-      const dy = ((e.clientY - drag.sy) / rect.height) * drag.view.h;
-      setView({ ...drag.view, x: drag.view.x - dx, y: drag.view.y - dy });
-    }
-  }
-
-  function onUp() {
-    if (box) {
-      const w = Math.abs(box.x2 - box.x1);
-      const h = Math.abs(box.y2 - box.y1);
-      if (w > 12 && h > 12) {
-        const nw = Math.max(w, h * (VIEW_W / VIEW_H));
-        setView({
-          x: Math.min(box.x1, box.x2) - (nw - w) / 2,
-          y: Math.min(box.y1, box.y2) - (nw * (VIEW_H / VIEW_W) - h) / 2,
-          w: nw,
-          h: nw * (VIEW_H / VIEW_W),
-        });
+  const geojson = useMemo(() => {
+    const features: any[] = []
+    for (const s of surveys) {
+      if (!s.is_mapped || !s.footprint_geojson) continue
+      let geom: any
+      try {
+        geom = JSON.parse(s.footprint_geojson)
+      } catch {
+        continue
       }
-      setBox(null);
+      if (!geom || geom.type !== "Polygon") continue
+      features.push({
+        type: "Feature",
+        id: s.id,
+        properties: {
+          id: s.id,
+          project_id: s.project_id,
+          project_name: s.projects?.project_name,
+          si_code: s.si_code,
+          basin: s.projects?.basin,
+          project_year: s.project_year,
+          data_dimension: s.projects?.data_dimension,
+          type_of_processing: s.type_of_processing,
+          flagged: s.flagged_for_review,
+        },
+        geometry: geom,
+      })
     }
-    setDrag(null);
-  }
 
-  const cursor = tool === "pan" ? (drag ? "grabbing" : "grab") : tool === "box" ? "crosshair" : "pointer";
-  const strokeScale = view.w / VIEW_W;
+    const lineFeatures: any[] = []
+    for (const s of surveys) {
+      if (s.projects?.data_dimension !== "2D") continue
+      const corners = s.corners?.filter((c) => c.lat != null && c.lon != null) ?? []
+      if (corners.length < 2) continue
+      const coords: [number, number][] = corners.map((c) => [c.lon!, c.lat!])
+      lineFeatures.push({
+        type: "Feature",
+        id: `line-${s.id}`,
+        properties: {
+          id: s.id,
+          project_id: s.project_id,
+          project_name: s.projects?.project_name,
+          si_code: s.si_code,
+          basin: s.projects?.basin,
+          project_year: s.project_year,
+          data_dimension: "2D",
+          type_of_processing: s.type_of_processing,
+          flagged: s.flagged_for_review,
+        },
+        geometry: { type: "LineString", coordinates: coords },
+      })
+    }
+
+    return { polygonFeatures: features, lineFeatures }
+  }, [surveys])
+
+  useEffect(() => {
+    if (mapRef.current || !containerRef.current) return
+    const map = new MaplibreMap({
+      container: containerRef.current,
+      style: makeBaseStyle(isDark),
+      center: [82.5, 22.5],
+      zoom: 4,
+      attributionControl: false,
+    })
+
+    map.addControl(new NavigationControl(), "bottom-right")
+
+    map.on("load", () => {
+      map.addSource("india-boundary", {
+        type: "geojson",
+        data: "/data/india-boundary.json",
+      })
+      map.addLayer({
+        id: "india-fill",
+        type: "fill",
+        source: "india-boundary",
+        paint: {
+          "fill-color": isDark ? "#1e293b" : "#e2e8f0",
+          "fill-opacity": 0.6,
+        },
+      })
+      map.addLayer({
+        id: "india-outline",
+        type: "line",
+        source: "india-boundary",
+        paint: {
+          "line-color": isDark ? "#475569" : "#94a3b8",
+          "line-width": 1.2,
+        },
+      })
+
+      map.addSource("survey-polygons", { type: "geojson", data: { type: "FeatureCollection", features: [] } })
+      map.addLayer({
+        id: "survey-fill",
+        type: "fill",
+        source: "survey-polygons",
+        paint: {
+          "fill-color": [
+            "case",
+            ["boolean", ["get", "flagged"], false],
+            isDark ? "#b91c1c" : "#dc2626",
+            isDark ? "#2d6a8f" : "#3b82f6",
+          ],
+          "fill-opacity": [
+            "case",
+            ["boolean", ["feature-state", "selected"], false],
+            0.55,
+            ["boolean", ["feature-state", "dimmed"], false],
+            0.08,
+            0.28,
+          ],
+        },
+      })
+      map.addLayer({
+        id: "survey-outline",
+        type: "line",
+        source: "survey-polygons",
+        paint: {
+          "line-color": [
+            "case",
+            ["boolean", ["feature-state", "selected"], false],
+            isDark ? "#fbbf24" : "#d97706",
+            ["boolean", ["get", "flagged"], false],
+            isDark ? "#ef4444" : "#dc2626",
+            isDark ? "#60a5fa" : "#2563eb",
+          ],
+          "line-width": [
+            "case",
+            ["boolean", ["feature-state", "selected"], false],
+            2.5,
+            0.7,
+          ],
+        },
+      })
+
+      map.addSource("survey-lines", { type: "geojson", data: { type: "FeatureCollection", features: [] } })
+      map.addLayer({
+        id: "survey-line-2d",
+        type: "line",
+        source: "survey-lines",
+        layout: { visibility: "none" },
+        paint: {
+          "line-color": [
+            "case",
+            ["boolean", ["feature-state", "selected"], false],
+            isDark ? "#fbbf24" : "#d97706",
+            ["boolean", ["get", "flagged"], false],
+            isDark ? "#ef4444" : "#dc2626",
+            isDark ? "#34d399" : "#059669",
+          ],
+          "line-width": [
+            "case",
+            ["boolean", ["feature-state", "selected"], false],
+            2.5,
+            1,
+          ],
+        },
+      })
+      map.addLayer({
+        id: "survey-point-2d",
+        type: "circle",
+        source: "survey-lines",
+        layout: { visibility: "none" },
+        paint: {
+          "circle-radius": [
+            "case",
+            ["boolean", ["feature-state", "selected"], false],
+            4,
+            2.5,
+          ],
+          "circle-color": [
+            "case",
+            ["boolean", ["feature-state", "selected"], false],
+            isDark ? "#fbbf24" : "#d97706",
+            isDark ? "#34d399" : "#059669",
+          ],
+          "circle-stroke-color": isDark ? "#1e293b" : "#ffffff",
+          "circle-stroke-width": 0.5,
+        },
+      })
+
+      map.setLayoutProperty("survey-fill", "visibility", viewMode === "3d" ? "visible" : "none")
+      map.setLayoutProperty("survey-outline", "visibility", viewMode === "3d" ? "visible" : "none")
+
+      setMapReady(true)
+    })
+
+    map.on("click", "survey-fill", (e) => {
+      if (!e.features?.[0]) return
+      const id = e.features[0].properties?.id
+      if (id != null) {
+        const rec = surveys.find((s) => s.id === id)
+        if (rec) onSelect(rec)
+      }
+    })
+
+    map.on("click", "survey-line-2d", (e) => {
+      if (!e.features?.[0]) return
+      const id = e.features[0].properties?.id
+      if (id != null) {
+        const rec = surveys.find((s) => s.id === id)
+        if (rec) onSelect(rec)
+      }
+    })
+
+    map.on("mouseenter", "survey-fill", () => { map.getCanvas().style.cursor = "pointer" })
+    map.on("mouseleave", "survey-fill", () => { map.getCanvas().style.cursor = "" })
+    map.on("mouseenter", "survey-line-2d", () => { map.getCanvas().style.cursor = "pointer" })
+    map.on("mouseleave", "survey-line-2d", () => { map.getCanvas().style.cursor = "" })
+
+    map.on("mousemove", "survey-fill", (e) => {
+      if (!e.features?.[0] || !map) return
+      const p = e.features[0].properties
+      const html = `<div class="px-3 py-2 text-xs" style="font-family:var(--font-sans);min-width:180px">
+        <div style="font-family:var(--font-mono);font-size:0.625rem;letter-spacing:0.16em;text-transform:uppercase;color:var(--muted-foreground);margin-bottom:4px">${p.si_code || "SIG —"}</div>
+        <div style="font-weight:600;margin-bottom:2px">${p.project_name || ""}</div>
+        <div style="color:var(--seismic)">${p.basin || ""} ${p.project_year ? `· ${p.project_year}` : ""}</div>
+        <div style="color:var(--muted-foreground)">${p.data_dimension || ""} ${p.type_of_processing ? `· ${p.type_of_processing}` : ""}</div>
+      </div>`
+      if (popupRef.current) popupRef.current.remove()
+      popupRef.current = new Popup({ closeButton: false, closeOnClick: false, offset: 10 })
+        .setLngLat(e.lngLat)
+        .setHTML(html)
+        .addTo(map)
+    })
+    map.on("mouseleave", "survey-fill", () => {
+      if (popupRef.current) { popupRef.current.remove(); popupRef.current = null }
+    })
+    map.on("mousemove", "survey-line-2d", (e) => {
+      if (!e.features?.[0] || !map) return
+      const p = e.features[0].properties
+      const html = `<div class="px-3 py-2 text-xs" style="font-family:var(--font-sans);min-width:180px">
+        <div style="font-family:var(--font-mono);font-size:0.625rem;letter-spacing:0.16em;text-transform:uppercase;color:var(--muted-foreground);margin-bottom:4px">${p.si_code || "SIG —"}</div>
+        <div style="font-weight:600;margin-bottom:2px">${p.project_name || ""}</div>
+        <div style="color:var(--seismic)">${p.basin || ""} ${p.project_year ? `· ${p.project_year}` : ""}</div>
+        <div style="color:var(--muted-foreground)">2D · ${p.type_of_processing || ""}</div>
+      </div>`
+      if (popupRef.current) popupRef.current.remove()
+      popupRef.current = new Popup({ closeButton: false, closeOnClick: false, offset: 10 })
+        .setLngLat(e.lngLat)
+        .setHTML(html)
+        .addTo(map)
+    })
+    map.on("mouseleave", "survey-line-2d", () => {
+      if (popupRef.current) { popupRef.current.remove(); popupRef.current = null }
+    })
+
+    mapRef.current = map
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      mapRef.current?.remove()
+      mapRef.current = null
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!mapRef.current || !mapReady) return
+    const map = mapRef.current
+    const src = map.getSource("survey-polygons") as GeoJSONSource
+    if (src) src.setData({ type: "FeatureCollection", features: geojson.polygonFeatures })
+    const lineSrc = map.getSource("survey-lines") as GeoJSONSource
+    if (lineSrc) lineSrc.setData({ type: "FeatureCollection", features: geojson.lineFeatures })
+  }, [geojson, mapReady])
+
+  useEffect(() => {
+    if (!mapRef.current || !mapReady) return
+    const map = mapRef.current
+    const features = [...geojson.polygonFeatures, ...geojson.lineFeatures]
+    for (const f of features) {
+      map.setFeatureState({ source: "survey-polygons", id: f.id }, { selected: false, dimmed: false })
+    }
+    for (const f of features) {
+      map.setFeatureState({ source: "survey-lines", id: `line-${f.id}` }, { selected: false, dimmed: false })
+    }
+    if (selectedId != null) {
+      map.setFeatureState({ source: "survey-polygons", id: selectedId }, { selected: true, dimmed: false })
+      map.setFeatureState({ source: "survey-lines", id: `line-${selectedId}` }, { selected: true, dimmed: false })
+      for (const f of features) {
+        if (f.id !== selectedId && f.id !== `line-${selectedId}`) {
+          map.setFeatureState({ source: "survey-polygons", id: f.id }, { dimmed: true })
+        }
+      }
+      for (const f of features) {
+        if (f.id !== selectedId && f.id !== `line-${selectedId}`) {
+          map.setFeatureState({ source: "survey-lines", id: `line-${f.id}` }, { dimmed: true })
+        }
+      }
+    }
+  }, [selectedId, geojson, mapReady])
+
+  useEffect(() => {
+    if (!zoomSignal || !mapRef.current) return
+    const map = mapRef.current
+    const zoom = map.getZoom()
+    map.flyTo({ zoom: Math.max(3, Math.min(12, zoom + (zoomSignal.dir > 0 ? 1 : -1))), duration: 300 })
+  }, [zoomSignal])
+
+  useEffect(() => {
+    if (!resetSignal || !mapRef.current) return
+    mapRef.current.flyTo({ center: [82.5, 22.5], zoom: 4, duration: 500 })
+  }, [resetSignal])
+
+  useEffect(() => {
+    if (!mapRef.current || !mapReady) return
+    const map = mapRef.current
+    map.setLayoutProperty("survey-fill", "visibility", viewMode === "3d" ? "visible" : "none")
+    map.setLayoutProperty("survey-outline", "visibility", viewMode === "3d" ? "visible" : "none")
+    map.setLayoutProperty("survey-line-2d", "visibility", viewMode === "2d" ? "visible" : "none")
+    map.setLayoutProperty("survey-point-2d", "visibility", viewMode === "2d" ? "visible" : "none")
+  }, [viewMode, mapReady])
+
+  const zoomToSurvey = useCallback((id: number) => {
+    if (!mapRef.current) return
+    const map = mapRef.current
+    const allFeatures = [...geojson.polygonFeatures, ...geojson.lineFeatures]
+    const feat = allFeatures.find((f) => f.id === id || f.id === `line-${id}`)
+    if (feat) {
+      const bounds = new LngLatBounds()
+      if (feat.geometry.type === "Polygon") {
+        for (const ring of feat.geometry.coordinates) {
+          for (const coord of ring) bounds.extend(coord as [number, number])
+        }
+      } else if (feat.geometry.type === "LineString") {
+        for (const coord of feat.geometry.coordinates) bounds.extend(coord as [number, number])
+      }
+      if (!bounds.isEmpty()) map.fitBounds(bounds, { padding: 60, duration: 600 })
+    } else {
+      const rec = surveys.find((s) => s.id === id)
+      if (rec?.centroid_lon != null && rec?.centroid_lat != null) {
+        map.flyTo({ center: [rec.centroid_lon, rec.centroid_lat], zoom: 8, duration: 600 })
+      }
+    }
+  }, [geojson, surveys])
+
+  useEffect(() => {
+    if (selectedId != null && mapReady) zoomToSurvey(selectedId)
+  }, [selectedId, mapReady])
 
   return (
-    <div className="relative h-full w-full overflow-hidden bg-ink survey-grid grain">
-      <svg
-        ref={svgRef}
-        viewBox={`${view.x} ${view.y} ${view.w} ${view.h}`}
-        className="h-full w-full select-none"
-        style={{ cursor }}
-        onMouseDown={onDown}
-        onMouseMove={onMove}
-        onMouseUp={onUp}
-        onMouseLeave={onUp}
-      >
-        <defs>
-          <linearGradient id="landfill" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="oklch(0.34 0.03 250)" />
-            <stop offset="100%" stopColor="oklch(0.27 0.028 250)" />
-          </linearGradient>
-        </defs>
-
-        {paths.map((d, i) => (
-          <path
-            key={i}
-            d={d}
-            fill="url(#landfill)"
-            stroke="oklch(0.62 0.05 240)"
-            strokeWidth={0.9 * strokeScale}
-            strokeLinejoin="round"
-          />
-        ))}
-
-        {mapped.map((s) => {
-          const x = px(s.bbox_min_lon as number);
-          const y = py(s.bbox_max_lat as number);
-          const w = px(s.bbox_max_lon as number) - x;
-          const h = py(s.bbox_min_lat as number) - y;
-          const active = s.id === selectedId;
-          const dim = yearFilterActive != null && s.project_year !== yearFilterActive;
-          const suspect =
-            (s.bbox_max_lon as number) - (s.bbox_min_lon as number) > 6 ||
-            (s.bbox_max_lat as number) - (s.bbox_min_lat as number) > 6;
-          return (
-            <rect
-              key={s.id}
-              x={x}
-              y={y}
-              width={Math.max(w, 1.4)}
-              height={Math.max(h, 1.4)}
-              rx={0.6}
-              fill={
-                suspect
-                  ? "transparent"
-                  : active
-                    ? "oklch(0.78 0.152 74 / 0.5)"
-                    : "oklch(0.72 0.121 190 / 0.32)"
-              }
-              stroke={
-                suspect
-                  ? "oklch(0.66 0.17 30)"
-                  : active
-                    ? "oklch(0.86 0.16 78)"
-                    : "oklch(0.75 0.12 190)"
-              }
-              strokeDasharray={suspect ? `${5 * strokeScale} ${4 * strokeScale}` : undefined}
-              strokeWidth={(active ? 2.1 : suspect ? 1.2 : 0.9) * strokeScale}
-              opacity={dim ? 0.14 : 1}
-              className="transition-opacity duration-300"
-              onMouseEnter={() => setHover(s)}
-              onMouseLeave={() => setHover((h2) => (h2?.id === s.id ? null : h2))}
-              onClick={(e) => {
-                e.stopPropagation();
-                onSelect(s);
-              }}
-              style={{ cursor: "pointer" }}
-            />
-          );
-        })}
-
-        {box && (
-          <rect
-            x={Math.min(box.x1, box.x2)}
-            y={Math.min(box.y1, box.y2)}
-            width={Math.abs(box.x2 - box.x1)}
-            height={Math.abs(box.y2 - box.y1)}
-            fill="oklch(0.78 0.152 74 / 0.12)"
-            stroke="oklch(0.86 0.16 78)"
-            strokeDasharray={`${4 * strokeScale} ${3 * strokeScale}`}
-            strokeWidth={1.4 * strokeScale}
-          />
-        )}
-      </svg>
-
-      <div className="pointer-events-none absolute left-3 bottom-3 rail-label bg-ink/80 px-2 py-1">
-        {mapped.length} footprints · clipped to Indian extent
-      </div>
-
-      {hover && (
-        <div className="pointer-events-none absolute right-3 top-3 max-w-[16rem] border border-border bg-popover/95 p-2 backdrop-blur">
-          <p className="rail-label">{hover.si_code ?? "SIG —"}</p>
-          <p className="mt-1 text-[0.72rem] leading-snug text-foreground">
-            {hover.projects?.project_name}
-          </p>
-          <p className="data-cell mt-1 text-seismic">
-            {hover.projects?.basin} · {hover.project_year}
-          </p>
-        </div>
+    <div className="relative h-full w-full overflow-hidden">
+      <div ref={containerRef} className="h-full w-full" />
+      {mapReady && (
+        <MapToolbar viewMode={viewMode} onViewModeChange={onViewModeChange} />
       )}
+      <div className="pointer-events-none absolute bottom-3 left-3 rail-label bg-ink/80 px-2 py-1">
+        {geojson.polygonFeatures.length + geojson.lineFeatures.length} surveys
+      </div>
     </div>
-  );
+  )
 }
