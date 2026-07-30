@@ -3,10 +3,11 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from "react"
 import { Map as MaplibreMap, NavigationControl, Popup, LngLatBounds } from "maplibre-gl"
 import type { GeoJSONSource } from "maplibre-gl"
+import "maplibre-gl/dist/maplibre-gl.css"
 import type { SurveyRecord } from "@/lib/seismic"
 import { useTheme } from "@/contexts/theme"
 import { MapToolbar } from "./MapToolbar"
-import type { ViewMode } from "./types"
+import type { ViewMode, BaseMapStyle } from "./types"
 
 type Props = {
   surveys: SurveyRecord[]
@@ -19,17 +20,48 @@ type Props = {
   onViewModeChange: (v: ViewMode) => void
 }
 
-function makeBaseStyle(isDark: boolean): any {
+const TILE_SOURCES: Record<BaseMapStyle, { tiles: string[]; attribution: string }> = {
+  dark: {
+    tiles: ["https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"],
+    attribution: "&copy; <a href=\"https://www.openstreetmap.org/copyright\">OSM</a> &copy; <a href=\"https://carto.com/\">CARTO</a>",
+  },
+  light: {
+    tiles: ["https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"],
+    attribution: "&copy; <a href=\"https://www.openstreetmap.org/copyright\">OSM</a> &copy; <a href=\"https://carto.com/\">CARTO</a>",
+  },
+  osm: {
+    tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+    attribution: "&copy; <a href=\"https://www.openstreetmap.org/copyright\">OSM</a>",
+  },
+  satellite: {
+    tiles: ["https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"],
+    attribution: "&copy; Esri",
+  },
+}
+
+function makeBaseStyle(baseStyle: BaseMapStyle, _isDark: boolean): any {
+  const tile = TILE_SOURCES[baseStyle]
+  const bg = baseStyle === "dark" || baseStyle === "satellite" ? "#0f172a" : "#f8fafc"
   return {
     version: 8,
-    sources: {},
+    sources: {
+      "base-tiles": {
+        type: "raster",
+        tiles: tile.tiles,
+        tileSize: 256,
+        attribution: tile.attribution,
+      },
+    },
     layers: [
       {
         id: "background",
         type: "background",
-        paint: {
-          "background-color": isDark ? "#0f172a" : "#f8fafc",
-        },
+        paint: { "background-color": bg },
+      },
+      {
+        id: "base-tiles",
+        type: "raster",
+        source: "base-tiles",
       },
     ],
   }
@@ -47,8 +79,10 @@ export function MapCanvas({
   const containerRef = useRef<HTMLDivElement>(null)
   const mapRef = useRef<MaplibreMap | null>(null)
   const popupRef = useRef<Popup | null>(null)
+  const resizeRef = useRef<ResizeObserver | null>(null)
   const [mapReady, setMapReady] = useState(false)
   const { isDark } = useTheme()
+  const [baseStyle, setBaseStyle] = useState<BaseMapStyle>(isDark ? "dark" : "light")
 
   const geojson = useMemo(() => {
     const features: any[] = []
@@ -108,135 +142,145 @@ export function MapCanvas({
 
   useEffect(() => {
     if (mapRef.current || !containerRef.current) return
+    const container = containerRef.current
+
     const map = new MaplibreMap({
-      container: containerRef.current,
-      style: makeBaseStyle(isDark),
+      container,
+      style: makeBaseStyle(baseStyle, isDark),
       center: [82.5, 22.5],
       zoom: 4,
       attributionControl: false,
     })
 
-    map.addControl(new NavigationControl(), "bottom-right")
+    map.addControl(new NavigationControl({ showZoom: true, showCompass: false }), "bottom-right")
 
     map.on("load", () => {
-      map.addSource("india-boundary", {
-        type: "geojson",
-        data: "/data/india-boundary.json",
-      })
-      map.addLayer({
-        id: "india-fill",
-        type: "fill",
-        source: "india-boundary",
-        paint: {
-          "fill-color": isDark ? "#1e293b" : "#e2e8f0",
-          "fill-opacity": 0.6,
-        },
-      })
-      map.addLayer({
-        id: "india-outline",
-        type: "line",
-        source: "india-boundary",
-        paint: {
-          "line-color": isDark ? "#475569" : "#94a3b8",
-          "line-width": 1.2,
-        },
-      })
+      try {
+        map.addSource("india-boundary", {
+          type: "geojson",
+          data: "/data/india-boundary.json",
+        })
+        map.addLayer({
+          id: "india-fill",
+          type: "fill",
+          source: "india-boundary",
+          paint: {
+            "fill-color": isDark ? "#1e293b" : "#e2e8f0",
+            "fill-opacity": 0.5,
+          },
+        })
+        map.addLayer({
+          id: "india-outline",
+          type: "line",
+          source: "india-boundary",
+          paint: {
+            "line-color": "#fbbf24",
+            "line-width": 2,
+            "line-opacity": 0.9,
+          },
+        })
 
-      map.addSource("survey-polygons", { type: "geojson", data: { type: "FeatureCollection", features: [] } })
-      map.addLayer({
-        id: "survey-fill",
-        type: "fill",
-        source: "survey-polygons",
-        paint: {
-          "fill-color": [
-            "case",
-            ["boolean", ["get", "flagged"], false],
-            isDark ? "#b91c1c" : "#dc2626",
-            isDark ? "#2d6a8f" : "#3b82f6",
-          ],
-          "fill-opacity": [
-            "case",
-            ["boolean", ["feature-state", "selected"], false],
-            0.55,
-            ["boolean", ["feature-state", "dimmed"], false],
-            0.08,
-            0.28,
-          ],
-        },
-      })
-      map.addLayer({
-        id: "survey-outline",
-        type: "line",
-        source: "survey-polygons",
-        paint: {
-          "line-color": [
-            "case",
-            ["boolean", ["feature-state", "selected"], false],
-            isDark ? "#fbbf24" : "#d97706",
-            ["boolean", ["get", "flagged"], false],
-            isDark ? "#ef4444" : "#dc2626",
-            isDark ? "#60a5fa" : "#2563eb",
-          ],
-          "line-width": [
-            "case",
-            ["boolean", ["feature-state", "selected"], false],
-            2.5,
-            0.7,
-          ],
-        },
-      })
+        map.addSource("survey-polygons", { type: "geojson", data: { type: "FeatureCollection", features: [] } })
+        map.addLayer({
+          id: "survey-fill",
+          type: "fill",
+          source: "survey-polygons",
+          paint: {
+            "fill-color": [
+              "case",
+              ["boolean", ["get", "flagged"], false],
+              isDark ? "#b91c1c" : "#dc2626",
+              isDark ? "#2d6a8f" : "#3b82f6",
+            ],
+            "fill-opacity": [
+              "case",
+              ["boolean", ["feature-state", "selected"], false],
+              0.55,
+              ["boolean", ["feature-state", "dimmed"], false],
+              0.08,
+              0.28,
+            ],
+          },
+        })
+        map.addLayer({
+          id: "survey-outline",
+          type: "line",
+          source: "survey-polygons",
+          paint: {
+            "line-color": [
+              "case",
+              ["boolean", ["feature-state", "selected"], false],
+              isDark ? "#fbbf24" : "#d97706",
+              ["boolean", ["get", "flagged"], false],
+              isDark ? "#ef4444" : "#dc2626",
+              isDark ? "#60a5fa" : "#2563eb",
+            ],
+            "line-width": [
+              "case",
+              ["boolean", ["feature-state", "selected"], false],
+              2.5,
+              0.7,
+            ],
+          },
+        })
 
-      map.addSource("survey-lines", { type: "geojson", data: { type: "FeatureCollection", features: [] } })
-      map.addLayer({
-        id: "survey-line-2d",
-        type: "line",
-        source: "survey-lines",
-        layout: { visibility: "none" },
-        paint: {
-          "line-color": [
-            "case",
-            ["boolean", ["feature-state", "selected"], false],
-            isDark ? "#fbbf24" : "#d97706",
-            ["boolean", ["get", "flagged"], false],
-            isDark ? "#ef4444" : "#dc2626",
-            isDark ? "#34d399" : "#059669",
-          ],
-          "line-width": [
-            "case",
-            ["boolean", ["feature-state", "selected"], false],
-            2.5,
-            1,
-          ],
-        },
-      })
-      map.addLayer({
-        id: "survey-point-2d",
-        type: "circle",
-        source: "survey-lines",
-        layout: { visibility: "none" },
-        paint: {
-          "circle-radius": [
-            "case",
-            ["boolean", ["feature-state", "selected"], false],
-            4,
-            2.5,
-          ],
-          "circle-color": [
-            "case",
-            ["boolean", ["feature-state", "selected"], false],
-            isDark ? "#fbbf24" : "#d97706",
-            isDark ? "#34d399" : "#059669",
-          ],
-          "circle-stroke-color": isDark ? "#1e293b" : "#ffffff",
-          "circle-stroke-width": 0.5,
-        },
-      })
+        map.addSource("survey-lines", { type: "geojson", data: { type: "FeatureCollection", features: [] } })
+        map.addLayer({
+          id: "survey-line-2d",
+          type: "line",
+          source: "survey-lines",
+          layout: { visibility: "none" },
+          paint: {
+            "line-color": [
+              "case",
+              ["boolean", ["feature-state", "selected"], false],
+              isDark ? "#fbbf24" : "#d97706",
+              ["boolean", ["get", "flagged"], false],
+              isDark ? "#ef4444" : "#dc2626",
+              isDark ? "#34d399" : "#059669",
+            ],
+            "line-width": [
+              "case",
+              ["boolean", ["feature-state", "selected"], false],
+              2.5,
+              1,
+            ],
+          },
+        })
+        map.addLayer({
+          id: "survey-point-2d",
+          type: "circle",
+          source: "survey-lines",
+          layout: { visibility: "none" },
+          paint: {
+            "circle-radius": [
+              "case",
+              ["boolean", ["feature-state", "selected"], false],
+              4,
+              2.5,
+            ],
+            "circle-color": [
+              "case",
+              ["boolean", ["feature-state", "selected"], false],
+              isDark ? "#fbbf24" : "#d97706",
+              isDark ? "#34d399" : "#059669",
+            ],
+            "circle-stroke-color": isDark ? "#1e293b" : "#ffffff",
+            "circle-stroke-width": 0.5,
+          },
+        })
 
-      map.setLayoutProperty("survey-fill", "visibility", viewMode === "3d" ? "visible" : "none")
-      map.setLayoutProperty("survey-outline", "visibility", viewMode === "3d" ? "visible" : "none")
+        map.setLayoutProperty("survey-fill", "visibility", viewMode === "3d" ? "visible" : "none")
+        map.setLayoutProperty("survey-outline", "visibility", viewMode === "3d" ? "visible" : "none")
 
-      setMapReady(true)
+        setMapReady(true)
+        console.log("[MapCanvas] ready")
+      } catch (err) {
+        console.error("[MapCanvas] init error:", err)
+      }
     })
+
+    map.on("error", (e) => console.error("[MapCanvas] map error:", e))
 
     map.on("click", "survey-fill", (e) => {
       if (!e.features?.[0]) return
@@ -261,19 +305,19 @@ export function MapCanvas({
     map.on("mouseenter", "survey-line-2d", () => { map.getCanvas().style.cursor = "pointer" })
     map.on("mouseleave", "survey-line-2d", () => { map.getCanvas().style.cursor = "" })
 
+    const popupHtml = (p: any) => `<div class="px-3 py-2 text-xs" style="font-family:var(--font-sans);min-width:180px">
+      <div style="font-family:var(--font-mono);font-size:0.625rem;letter-spacing:0.16em;text-transform:uppercase;color:var(--muted-foreground);margin-bottom:4px">${p.si_code || "SIG —"}</div>
+      <div style="font-weight:600;margin-bottom:2px">${p.project_name || ""}</div>
+      <div style="color:var(--seismic)">${p.basin || ""} ${p.project_year ? `· ${p.project_year}` : ""}</div>
+      <div style="color:var(--muted-foreground)">${p.data_dimension || ""} ${p.type_of_processing ? `· ${p.type_of_processing}` : ""}</div>
+    </div>`
+
     map.on("mousemove", "survey-fill", (e) => {
       if (!e.features?.[0] || !map) return
-      const p = e.features[0].properties
-      const html = `<div class="px-3 py-2 text-xs" style="font-family:var(--font-sans);min-width:180px">
-        <div style="font-family:var(--font-mono);font-size:0.625rem;letter-spacing:0.16em;text-transform:uppercase;color:var(--muted-foreground);margin-bottom:4px">${p.si_code || "SIG —"}</div>
-        <div style="font-weight:600;margin-bottom:2px">${p.project_name || ""}</div>
-        <div style="color:var(--seismic)">${p.basin || ""} ${p.project_year ? `· ${p.project_year}` : ""}</div>
-        <div style="color:var(--muted-foreground)">${p.data_dimension || ""} ${p.type_of_processing ? `· ${p.type_of_processing}` : ""}</div>
-      </div>`
       if (popupRef.current) popupRef.current.remove()
       popupRef.current = new Popup({ closeButton: false, closeOnClick: false, offset: 10 })
         .setLngLat(e.lngLat)
-        .setHTML(html)
+        .setHTML(popupHtml(e.features[0].properties))
         .addTo(map)
     })
     map.on("mouseleave", "survey-fill", () => {
@@ -281,14 +325,9 @@ export function MapCanvas({
     })
     map.on("mousemove", "survey-line-2d", (e) => {
       if (!e.features?.[0] || !map) return
-      const p = e.features[0].properties
-      const html = `<div class="px-3 py-2 text-xs" style="font-family:var(--font-sans);min-width:180px">
-        <div style="font-family:var(--font-mono);font-size:0.625rem;letter-spacing:0.16em;text-transform:uppercase;color:var(--muted-foreground);margin-bottom:4px">${p.si_code || "SIG —"}</div>
-        <div style="font-weight:600;margin-bottom:2px">${p.project_name || ""}</div>
-        <div style="color:var(--seismic)">${p.basin || ""} ${p.project_year ? `· ${p.project_year}` : ""}</div>
-        <div style="color:var(--muted-foreground)">2D · ${p.type_of_processing || ""}</div>
-      </div>`
       if (popupRef.current) popupRef.current.remove()
+      const p = e.features[0].properties
+      const html = popupHtml({ ...p, data_dimension: "2D" })
       popupRef.current = new Popup({ closeButton: false, closeOnClick: false, offset: 10 })
         .setLngLat(e.lngLat)
         .setHTML(html)
@@ -299,10 +338,37 @@ export function MapCanvas({
     })
 
     mapRef.current = map
+
+    resizeRef.current = new ResizeObserver(() => {
+      if (mapRef.current) mapRef.current.resize()
+    })
+    if (container.parentElement) {
+      resizeRef.current.observe(container.parentElement)
+    }
   }, [])
 
   useEffect(() => {
+    mapRef.current?.resize()
+  }, [isDark])
+
+  useEffect(() => {
+    if (!mapRef.current || !mapReady) return
+    const map = mapRef.current
+    const tile = TILE_SOURCES[baseStyle]
+    if (map.getLayer("base-tiles")) map.removeLayer("base-tiles")
+    if (map.getSource("base-tiles")) map.removeSource("base-tiles")
+    map.addSource("base-tiles", {
+      type: "raster",
+      tiles: tile.tiles,
+      tileSize: 256,
+      attribution: tile.attribution,
+    })
+    map.addLayer({ id: "base-tiles", type: "raster", source: "base-tiles" }, "india-fill")
+  }, [baseStyle, mapReady])
+
+  useEffect(() => {
     return () => {
+      resizeRef.current?.disconnect()
       mapRef.current?.remove()
       mapRef.current = null
     }
@@ -320,24 +386,23 @@ export function MapCanvas({
   useEffect(() => {
     if (!mapRef.current || !mapReady) return
     const map = mapRef.current
-    const features = [...geojson.polygonFeatures, ...geojson.lineFeatures]
-    for (const f of features) {
+    for (const f of geojson.polygonFeatures) {
       map.setFeatureState({ source: "survey-polygons", id: f.id }, { selected: false, dimmed: false })
     }
-    for (const f of features) {
-      map.setFeatureState({ source: "survey-lines", id: `line-${f.id}` }, { selected: false, dimmed: false })
+    for (const f of geojson.lineFeatures) {
+      map.setFeatureState({ source: "survey-lines", id: f.id }, { selected: false, dimmed: false })
     }
     if (selectedId != null) {
       map.setFeatureState({ source: "survey-polygons", id: selectedId }, { selected: true, dimmed: false })
       map.setFeatureState({ source: "survey-lines", id: `line-${selectedId}` }, { selected: true, dimmed: false })
-      for (const f of features) {
+      for (const f of geojson.polygonFeatures) {
         if (f.id !== selectedId && f.id !== `line-${selectedId}`) {
           map.setFeatureState({ source: "survey-polygons", id: f.id }, { dimmed: true })
         }
       }
-      for (const f of features) {
+      for (const f of geojson.lineFeatures) {
         if (f.id !== selectedId && f.id !== `line-${selectedId}`) {
-          map.setFeatureState({ source: "survey-lines", id: `line-${f.id}` }, { dimmed: true })
+          map.setFeatureState({ source: "survey-lines", id: f.id }, { dimmed: true })
         }
       }
     }
@@ -346,8 +411,7 @@ export function MapCanvas({
   useEffect(() => {
     if (!zoomSignal || !mapRef.current) return
     const map = mapRef.current
-    const zoom = map.getZoom()
-    map.flyTo({ zoom: Math.max(3, Math.min(12, zoom + (zoomSignal.dir > 0 ? 1 : -1))), duration: 300 })
+    map.flyTo({ zoom: Math.max(3, Math.min(12, map.getZoom() + (zoomSignal.dir > 0 ? 1 : -1))), duration: 300 })
   }, [zoomSignal])
 
   useEffect(() => {
@@ -392,12 +456,17 @@ export function MapCanvas({
   }, [selectedId, mapReady])
 
   return (
-    <div className="relative h-full w-full overflow-hidden">
-      <div ref={containerRef} className="h-full w-full" />
+    <div className="relative flex w-full flex-col" style={{ minHeight: "400px" }}>
+      <div ref={containerRef} className="flex-1" />
       {mapReady && (
-        <MapToolbar viewMode={viewMode} onViewModeChange={onViewModeChange} />
+        <MapToolbar
+          viewMode={viewMode}
+          onViewModeChange={onViewModeChange}
+          baseStyle={baseStyle}
+          onBaseStyleChange={setBaseStyle}
+        />
       )}
-      <div className="pointer-events-none absolute bottom-3 left-3 rail-label bg-ink/80 px-2 py-1">
+      <div className="pointer-events-none absolute bottom-3 left-3 rail-label bg-ink/80 px-2 py-1 z-10">
         {geojson.polygonFeatures.length + geojson.lineFeatures.length} surveys
       </div>
     </div>

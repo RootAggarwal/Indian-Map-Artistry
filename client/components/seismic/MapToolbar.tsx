@@ -7,11 +7,12 @@ import type { ViewMode, BaseMapStyle } from "./types"
 type Props = {
   viewMode: ViewMode
   onViewModeChange: (v: ViewMode) => void
+  baseStyle: BaseMapStyle
+  onBaseStyleChange: (v: BaseMapStyle) => void
 }
 
-export function MapToolbar({ viewMode, onViewModeChange }: Props) {
+export function MapToolbar({ viewMode, onViewModeChange, baseStyle, onBaseStyleChange }: Props) {
   const [layerOpen, setLayerOpen] = useState(false)
-  const [baseStyle, setBaseStyle] = useState<BaseMapStyle>("dark")
 
   const styles: { id: BaseMapStyle; label: string; icon: typeof Sun }[] = [
     { id: "satellite", label: "Satellite", icon: Satellite },
@@ -28,7 +29,7 @@ export function MapToolbar({ viewMode, onViewModeChange }: Props) {
           return (
             <button
               key={s.id}
-              onClick={() => setBaseStyle(s.id)}
+              onClick={() => onBaseStyleChange(s.id)}
               className={`grid h-8 w-8 place-items-center rounded text-xs transition-colors ${
                 baseStyle === s.id
                   ? "bg-ochre/20 text-ochre"
