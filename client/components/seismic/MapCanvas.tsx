@@ -85,6 +85,7 @@ export function MapCanvas({
   const [baseStyle, setBaseStyle] = useState<BaseMapStyle>(isDark ? "dark" : "light")
 
   const geojson = useMemo(() => {
+    console.log(`[MapCanvas] geojson recompute: ${surveys.length} surveys`)
     const features: any[] = []
     for (const s of surveys) {
       if (!s.is_mapped || !s.footprint_geojson) continue
@@ -390,10 +391,21 @@ export function MapCanvas({
   useEffect(() => {
     if (!mapRef.current || !mapReady) return
     const map = mapRef.current
+    const polygonCount = geojson.polygonFeatures.length
+    const lineCount = geojson.lineFeatures.length
+    console.log(`[MapCanvas] setData: ${polygonCount} polygons, ${lineCount} lines`)
     const src = map.getSource("survey-polygons") as GeoJSONSource
-    if (src) src.setData({ type: "FeatureCollection", features: geojson.polygonFeatures })
+    if (src) {
+      src.setData({ type: "FeatureCollection", features: geojson.polygonFeatures })
+    } else {
+      console.warn("[MapCanvas] survey-polygons source not found")
+    }
     const lineSrc = map.getSource("survey-lines") as GeoJSONSource
-    if (lineSrc) lineSrc.setData({ type: "FeatureCollection", features: geojson.lineFeatures })
+    if (lineSrc) {
+      lineSrc.setData({ type: "FeatureCollection", features: geojson.lineFeatures })
+    } else {
+      console.warn("[MapCanvas] survey-lines source not found")
+    }
   }, [geojson, mapReady])
 
   useEffect(() => {
