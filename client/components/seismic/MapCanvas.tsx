@@ -459,15 +459,24 @@ export function MapCanvas({
     const allFeatures = [...geojson.polygonFeatures, ...geojson.lineFeatures]
     const feat = allFeatures.find((f) => f.id === id || f.id === `line-${id}`)
     if (feat) {
-      const bounds = new LngLatBounds()
-      if (feat.geometry.type === "Polygon") {
-        for (const ring of feat.geometry.coordinates) {
-          for (const coord of ring) bounds.extend(coord as [number, number])
+      try {
+        const bounds = new LngLatBounds()
+        const coords = feat.geometry.type === "Polygon"
+          ? feat.geometry.coordinates.flat()
+          : feat.geometry.coordinates
+        for (const c of coords) {
+          if (c[0] >= -180 && c[0] <= 180 && c[1] >= -90 && c[1] <= 90) {
+            bounds.extend(c as [number, number])
+          }
         }
-      } else if (feat.geometry.type === "LineString") {
-        for (const coord of feat.geometry.coordinates) bounds.extend(coord as [number, number])
+        if (!bounds.isEmpty()) map.fitBounds(bounds, { padding: 60, duration: 600 })
+      } catch {
+        // fallback: zoom to centroid if available
+        const rec = surveys.find((s) => s.id === id)
+        if (rec?.centroid_lon != null && rec?.centroid_lat != null) {
+          map.flyTo({ center: [rec.centroid_lon, rec.centroid_lat], zoom: 8, duration: 600 })
+        }
       }
-      if (!bounds.isEmpty()) map.fitBounds(bounds, { padding: 60, duration: 600 })
     } else {
       const rec = surveys.find((s) => s.id === id)
       if (rec?.centroid_lon != null && rec?.centroid_lat != null) {
