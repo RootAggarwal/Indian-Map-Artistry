@@ -9,6 +9,7 @@ reportsRouter.get("/", async (_req, res, next) => {
       SELECT id, project_id, si_code, report_type, file_name
       FROM project_reports
     `)
+    res.set("Cache-Control", "no-store, no-cache, must-revalidate, private")
     res.json(rows.map((row: any) => ({ ...row, report_path: null as string | null })))
   } catch (err) {
     next(err)

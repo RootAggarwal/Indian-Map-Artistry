@@ -6,6 +6,9 @@ import { router } from "./routes/index.js"
 const app = express()
 const PORT = Number(process.env.PORT) || 4000
 
+app.disable("etag")
+app.set("etag", false)
+
 app.use(cors({ origin: process.env.CLIENT_ORIGIN || "http://localhost:3000" }))
 app.use(express.json({ limit: "5mb" }))
 

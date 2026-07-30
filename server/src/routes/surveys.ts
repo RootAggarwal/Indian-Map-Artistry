@@ -95,6 +95,7 @@ surveysRouter.get("/", async (_req, res, next) => {
       JOIN projects p ON p.project_id = r.project_id
       ORDER BY r.project_year DESC NULLS LAST, r.project_id ASC
     `)
+    res.set("Cache-Control", "no-store, no-cache, must-revalidate, private")
     res.json(
       rows.map((row: any) => ({
         ...row,
