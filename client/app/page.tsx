@@ -342,7 +342,7 @@ export default function Dashboard() {
             onToggleBottom={() => setBottomOpen((o) => !o)}
           />
           <div className="flex min-h-0 flex-1">
-            <div className="min-w-0 flex-1">
+            <div className="min-w-0 flex-1 flex flex-col">
               <MapCanvas
                 surveys={filtered}
                 selectedId={activeId}

@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useMemo, useRef, useState, useCallback } from "react"
+import { useEffect, useMemo, useRef, useState, useCallback, useLayoutEffect } from "react"
 import { Map as MaplibreMap, NavigationControl, Popup, LngLatBounds } from "maplibre-gl"
 import type { GeoJSONSource } from "maplibre-gl"
 import "maplibre-gl/dist/maplibre-gl.css"
@@ -140,9 +140,13 @@ export function MapCanvas({
     return { polygonFeatures: features, lineFeatures }
   }, [surveys])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (mapRef.current || !containerRef.current) return
     const container = containerRef.current
+
+    if (!container.offsetHeight) {
+      console.warn("[MapCanvas] container has zero height, will retry")
+    }
 
     const map = new MaplibreMap({
       container,
@@ -339,17 +343,25 @@ export function MapCanvas({
 
     mapRef.current = map
 
-    resizeRef.current = new ResizeObserver(() => {
-      if (mapRef.current) mapRef.current.resize()
+    const ro = new ResizeObserver(() => {
+      if (mapRef.current) {
+        mapRef.current.resize()
+        if (!mapReady) console.log("[MapCanvas] resize after init", container.offsetHeight)
+      }
     })
-    if (container.parentElement) {
-      resizeRef.current.observe(container.parentElement)
+    ro.observe(container.parentElement || container)
+    resizeRef.current = ro
+
+    return () => {
+      ro.disconnect()
+      mapRef.current?.remove()
+      mapRef.current = null
     }
   }, [])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     mapRef.current?.resize()
-  }, [isDark])
+  })
 
   useEffect(() => {
     if (!mapRef.current || !mapReady) return
@@ -456,8 +468,8 @@ export function MapCanvas({
   }, [selectedId, mapReady])
 
   return (
-    <div className="relative flex w-full flex-col" style={{ minHeight: "400px" }}>
-      <div ref={containerRef} className="flex-1" />
+    <div className="relative h-full w-full overflow-hidden">
+      <div ref={containerRef} className="h-full w-full" />
       {mapReady && (
         <MapToolbar
           viewMode={viewMode}
