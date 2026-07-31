@@ -6,10 +6,10 @@ types.setTypeParser(114, JSON.parse)
 types.setTypeParser(3802, JSON.parse)
 
 function createPool() {
-  const connectionString = process.env.DATABASE_URL || "postgresql://postgres:postgres@localhost:5432/geopic"
+  let connectionString = process.env.DATABASE_URL
 
   if (!connectionString) {
-    throw new Error("DATABASE_URL environment variable is not set")
+    connectionString = "postgresql://postgres:postgres@localhost:5432/geopic"
   }
 
   return new Pool({ connectionString })

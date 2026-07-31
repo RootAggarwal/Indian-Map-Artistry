@@ -3,44 +3,10 @@ import { z } from "zod"
 import { query } from "../db.js"
 import { jsPDF } from "jspdf"
 import { autoTable } from "jspdf-autotable"
+import { reprojectRecord } from "../lib/reproject.js"
+import { cornersToWkt } from "../lib/crs.js"
 
 export const surveysRouter = Router()
-
-function utmToLatLon(easting: number, northing: number, zone: number): { lat: number; lon: number } {
-  const k0 = 0.9996
-  const a = 6378137
-  const f = 1 / 298.257223563
-  const e = Math.sqrt(2 * f - f * f)
-  const e1sq = e * e / (1 - e * e)
-  const x = easting - 500000
-  const y = northing
-  const z = zone
-  const m = y / k0
-  const mu = m / (a * (1 - e * e / 4 - 3 * e * e * e * e / 64 - 5 * e * e * e * e * e * e / 256))
-  const e1 = (1 - Math.sqrt(1 - e * e)) / (1 + Math.sqrt(1 - e * e))
-  const j1 = 3 * e1 / 2 - 27 * e1 * e1 * e1 / 32
-  const j2 = 21 * e1 * e1 / 16 - 55 * e1 * e1 * e1 * e1 / 32
-  const j3 = 151 * e1 * e1 * e1 / 96
-  const j4 = 1097 * e1 * e1 * e1 * e1 / 512
-  const fp = mu + j1 * Math.sin(2 * mu) + j2 * Math.sin(4 * mu) + j3 * Math.sin(6 * mu) + j4 * Math.sin(8 * mu)
-  const sinfp = Math.sin(fp)
-  const cosfp = Math.cos(fp)
-  const t = sinfp / cosfp
-  const n2 = e1sq * cosfp * cosfp
-  const c = 1 + n2
-  const v = a / Math.sqrt(1 - e * e * sinfp * sinfp)
-  const r = v * (1 - e * e) / (1 - e * e * sinfp * sinfp)
-  const d = x / (v * k0)
-  const lat = fp - v * t / r * (d * d / 2 - (5 + 3 * t * t + 10 * c - 4 * c * c - 9 * e1sq) * d * d * d * d / 24 + (61 + 90 * t * t + 298 * c + 45 * t * t * t * t) * d * d * d * d * d * d / 720)
-  const lon = (d - (1 + 2 * t * t + c) * d * d * d / 6 + (5 - 2 * c + 28 * t * t - 3 * c * c + 8 * e1sq + 24 * t * t * t * t) * d * d * d * d * d / 120) / cosfp + ((z - 1) * 6 - 180 + 3) * Math.PI / 180
-  return { lat: lat * 180 / Math.PI, lon: lon * 180 / Math.PI }
-}
-
-function wktPolygon(pts: { lon: number; lat: number }[]): string {
-  if (pts.length < 3) return ""
-  const ring = pts.map((p) => `${p.lon} ${p.lat}`).join(", ")
-  return `POLYGON((${ring}, ${pts[0].lon} ${pts[0].lat}))`
-}
 
 function parsePgArray(val: unknown): string[] {
   if (Array.isArray(val)) return val
@@ -74,15 +40,33 @@ surveysRouter.get("/", async (_req, res, next) => {
         r.id, r.project_id, r.si_code, r.project_year, r.type_of_processing,
         r.quantum_skm, r.quantum_slkm, r.processing_bin, r.record_length,
         r.sampling_interval, r.fold, r.azimuth, r.spheroid, r.utm_zone,
-        r.projection, r.project_timeline, r.centroid_lat, r.centroid_lon,
+        r.projection, r.project_timeline,         r.centroid_lat, r.centroid_lon,
         r.bbox_min_lon, r.bbox_min_lat, r.bbox_max_lon, r.bbox_max_lat,
         r.corners, r.is_mapped, r.geometry_status, r.geometry_notes,
         r.flagged_for_review,
+        r.source_crs, r.source_epsg, r.conversion_status, r.validation_issues,
         r.g1_x, r.g1_y, r.g1_il, r.g1_xl,
         r.g2_x, r.g2_y, r.g2_il, r.g2_xl,
         r.g3_x, r.g3_y, r.g3_il, r.g3_xl,
         r.g4_x, r.g4_y, r.g4_il, r.g4_xl,
-        ST_AsGeoJSON(r.footprint) AS footprint_geojson,
+        ST_AsGeoJSON(
+          COALESCE(
+            r.footprint,
+            CASE
+              WHEN r.bbox_min_lon IS NOT NULL AND r.bbox_min_lat IS NOT NULL AND r.bbox_max_lon IS NOT NULL AND r.bbox_max_lat IS NOT NULL
+              THEN ST_MakeEnvelope(
+                LEAST(r.bbox_min_lon, r.bbox_max_lon),
+                LEAST(r.bbox_min_lat, r.bbox_max_lat),
+                GREATEST(r.bbox_min_lon, r.bbox_max_lon),
+                GREATEST(r.bbox_min_lat, r.bbox_max_lat),
+                4326
+              )
+              WHEN r.centroid_lon IS NOT NULL AND r.centroid_lat IS NOT NULL
+              THEN ST_MakeEnvelope(r.centroid_lon - 0.05, r.centroid_lat - 0.05, r.centroid_lon + 0.05, r.centroid_lat + 0.05, 4326)
+              ELSE NULL
+            END
+          )
+        ) AS footprint_geojson,
         ST_AsGeoJSON(r.centroid_geom) AS centroid_geojson,
         json_build_object(
           'project_id', p.project_id,
@@ -100,6 +84,7 @@ surveysRouter.get("/", async (_req, res, next) => {
       rows.map((row: any) => ({
         ...row,
         geometry_notes: parsePgArray(row.geometry_notes),
+        validation_issues: parsePgArray(row.validation_issues),
         projects: typeof row.projects === "string" ? JSON.parse(row.projects) : row.projects,
       })),
     )
@@ -166,6 +151,17 @@ surveysRouter.post("/", async (req, res, next) => {
       const notes: string[] = []
       let bbox: any = null
       let corners: any[] = []
+      let conv: {
+        sourceCrs: string
+        sourceEpsg: number | null
+        conversionStatus: string
+        validationIssues: string[]
+      } = {
+        sourceCrs: "WGS 84",
+        sourceEpsg: 4326,
+        conversionStatus: "UNMAPPED",
+        validationIssues: [],
+      }
       const g = [d.g1_x, d.g2_x, d.g3_x, d.g4_x].filter((v): v is number => v != null)
 
       if (d.min_lon != null && d.min_lat != null && d.max_lon != null && d.max_lat != null) {
@@ -194,49 +190,61 @@ surveysRouter.post("/", async (req, res, next) => {
           { lon: bbox.maxLon, lat: bbox.maxLat, corner: 3, is_assumed: true },
           { lon: bbox.minLon, lat: bbox.maxLat, corner: 4, is_assumed: true },
         ]
+        conv = { sourceCrs: "Geographic (WGS 84)", sourceEpsg: 4326, conversionStatus: "CONVERTED", validationIssues: [] }
       } else if (g.length >= 2) {
         const xs = [d.g1_x, d.g2_x, d.g3_x, d.g4_x].filter((v): v is number => v != null)
         const ys = [d.g1_y, d.g2_y, d.g3_y, d.g4_y].filter((v): v is number => v != null)
         if (xs.length && ys.length) {
           const isProjected = xs.some((v) => Math.abs(v) > 180) || ys.some((v) => Math.abs(v) > 90)
-          let zone = 0
           if (isProjected) {
-            const zoneStr = String(d.utm_zone || "")
-            const m = zoneStr.match(/(\d+)/)
-            if (m) {
-              const parsed = parseInt(m[1], 10)
-              if (parsed >= 1 && parsed <= 60) zone = parsed
+            const rr = reprojectRecord({
+              id: projectId,
+              si_code: d.si_code ?? null,
+              projection: d.projection ?? null,
+              utm_zone: d.utm_zone ?? null,
+              spheroid: d.spheroid ?? null,
+              basin: d.basin ?? null,
+              g: [1, 2, 3, 4].map((i) => ({
+                x: (d as any)[`g${i}_x`] ?? null,
+                y: (d as any)[`g${i}_y`] ?? null,
+                il: (d as any)[`g${i}_il`] ?? null,
+                xl: (d as any)[`g${i}_xl`] ?? null,
+                corner: i,
+              })),
+            })
+            corners = rr.corners as any[]
+            bbox = rr.bbox
+            notes.push(...rr.geometryNotes)
+            notes.push(...rr.validationIssues)
+            conv = {
+              sourceCrs: rr.sourceCrs,
+              sourceEpsg: rr.sourceEpsg,
+              conversionStatus: rr.conversionStatus,
+              validationIssues: rr.validationIssues,
             }
-            if (!zone) {
-              // auto-detect zone from the mean easting (rough India centroid)
-              const meanEasting = xs.reduce((a, b) => a + b, 0) / xs.length
-              const estLon = (meanEasting - 500000) / 111320 + 78
-              zone = Math.round((estLon + 180) / 6)
-              zone = Math.max(42, Math.min(46, zone))
-              notes.push(`UTM zone auto-detected as ${zone} from coordinates.`)
+          } else {
+            const geoPts: { lon: number; lat: number }[] = []
+            for (let i = 1; i <= 4; i++) {
+              const x = (d as any)[`g${i}_x`]
+              const y = (d as any)[`g${i}_y`]
+              const il = (d as any)[`g${i}_il`]
+              const xl = (d as any)[`g${i}_xl`]
+              if (x != null && y != null) {
+                const pt = { lon: x, lat: y }
+                geoPts.push(pt)
+                corners.push({ lon: pt.lon, lat: pt.lat, il: il ?? null, xl: xl ?? null, easting: null, northing: null, corner: i, is_assumed: false })
+              }
+            }
+            if (geoPts.length >= 2) {
+              bbox = {
+                minLon: clamp(Math.min(...geoPts.map((p) => p.lon)), INDIA.minLon, INDIA.maxLon),
+                maxLon: clamp(Math.max(...geoPts.map((p) => p.lon)), INDIA.minLon, INDIA.maxLon),
+                minLat: clamp(Math.min(...geoPts.map((p) => p.lat)), INDIA.minLat, INDIA.maxLat),
+                maxLat: clamp(Math.max(...geoPts.map((p) => p.lat)), INDIA.minLat, INDIA.maxLat),
+              }
+              conv = { sourceCrs: "Geographic (WGS 84)", sourceEpsg: 4326, conversionStatus: "CONVERTED", validationIssues: [] }
             }
           }
-          const geoPts: { lon: number; lat: number }[] = []
-          for (let i = 1; i <= 4; i++) {
-            const x = (d as any)[`g${i}_x`]
-            const y = (d as any)[`g${i}_y`]
-            const il = (d as any)[`g${i}_il`]
-            const xl = (d as any)[`g${i}_xl`]
-            if (x != null && y != null) {
-              const pt = isProjected ? utmToLatLon(x, y, zone) : { lon: x, lat: y }
-              geoPts.push(pt)
-              corners.push({ lon: pt.lon, lat: pt.lat, il: il ?? null, xl: xl ?? null, easting: isProjected ? x : null, northing: isProjected ? y : null, corner: i, is_assumed: false })
-            }
-          }
-          if (geoPts.length >= 2) {
-            bbox = {
-              minLon: clamp(Math.min(...geoPts.map((p) => p.lon)), INDIA.minLon, INDIA.maxLon),
-              maxLon: clamp(Math.max(...geoPts.map((p) => p.lon)), INDIA.minLon, INDIA.maxLon),
-              minLat: clamp(Math.min(...geoPts.map((p) => p.lat)), INDIA.minLat, INDIA.maxLat),
-              maxLat: clamp(Math.max(...geoPts.map((p) => p.lat)), INDIA.minLat, INDIA.maxLat),
-            }
-          }
-          if (isProjected) notes.push("Easting/northing converted from UTM to geographic coordinates.")
           if (!notes.length && corners.length) notes.push("Footprint derived from survey corner coordinates.")
         }
       }
@@ -250,7 +258,7 @@ surveysRouter.post("/", async (req, res, next) => {
       }
 
       const footprintWkt = corners.length >= 3
-        ? wktPolygon(corners.map((c: any) => ({ lon: c.lon, lat: c.lat })))
+        ? cornersToWkt(corners as any[])
         : ""
       const centroidWkt = bbox
         ? `POINT(${(bbox.minLon + bbox.maxLon) / 2} ${(bbox.minLat + bbox.maxLat) / 2})`
@@ -284,6 +292,10 @@ surveysRouter.post("/", async (req, res, next) => {
         geometry_status: bbox ? (d.g1_x != null ? "SURVEYED" : "BOXED") : "UNMAPPED",
         geometry_notes: notes,
         flagged_for_review: !bbox || (d.data_dimension === "3D" && !bbox),
+        source_crs: conv.sourceCrs,
+        source_epsg: conv.sourceEpsg,
+        conversion_status: conv.conversionStatus,
+        validation_issues: conv.validationIssues,
         footprint_wkt: footprintWkt,
         centroid_wkt: centroidWkt,
       })
@@ -314,6 +326,7 @@ surveysRouter.post("/", async (req, res, next) => {
       "g4_x", "g4_y", "g4_il", "g4_xl",
       "corners", "is_mapped",
       "geometry_status", "geometry_notes", "flagged_for_review",
+      "source_crs", "source_epsg", "conversion_status", "validation_issues",
     ]
     const pgCols = ["footprint", "centroid_geom"]
     const rCols = [...rBaseCols, ...pgCols]
@@ -339,6 +352,7 @@ surveysRouter.post("/", async (req, res, next) => {
       r.g4_x, r.g4_y, r.g4_il, r.g4_xl,
       JSON.stringify(r.corners), r.is_mapped,
       r.geometry_status, r.geometry_notes, r.flagged_for_review,
+      r.source_crs, r.source_epsg, r.conversion_status, r.validation_issues,
     ])
     // Append WKT params for PostGIS columns
     for (const r of records) {
@@ -519,92 +533,41 @@ surveysRouter.put("/:id", async (req, res, next) => {
   }
 })
 
-function autoDetectZone(xs: number[]): number {
-  if (!xs.length) return 44
-  const meanEasting = xs.reduce((a, b) => a + b, 0) / xs.length
-  const estLon = (meanEasting - 500000) / 111320 + 78
-  const zone = Math.round((estLon + 180) / 6)
-  return Math.max(42, Math.min(46, zone))
-}
-
 surveysRouter.post("/reprocess", async (_req, res, next) => {
   try {
     const { rows } = await query(`
-      SELECT id, utm_zone, g1_x, g1_y, g2_x, g2_y, g3_x, g3_y, g4_x, g4_y,
-        g1_il, g1_xl, g2_il, g2_xl, g3_il, g3_xl, g4_il, g4_xl
-      FROM processing_records
-      WHERE g1_x IS NOT NULL OR g2_x IS NOT NULL
+      SELECT r.id, r.si_code, r.projection, r.utm_zone, r.spheroid,
+        r.g1_x, r.g1_y, r.g2_x, r.g2_y, r.g3_x, r.g3_y, r.g4_x, r.g4_y,
+        r.g1_il, r.g1_xl, r.g2_il, r.g2_xl, r.g3_il, r.g3_xl, r.g4_il, r.g4_xl,
+        p.basin
+      FROM processing_records r
+      JOIN projects p ON p.project_id = r.project_id
+      WHERE r.g1_x IS NOT NULL OR r.g2_x IS NOT NULL
     `)
     let fixed = 0
     let errors = 0
     for (const rec of rows as any[]) {
       try {
-        const xs: number[] = []
-        const ys: number[] = []
-        for (let i = 1; i <= 4; i++) {
-          const x = (rec as any)[`g${i}_x`]
-          const y = (rec as any)[`g${i}_y`]
-          if (x != null) xs.push(Number(x))
-          if (y != null) ys.push(Number(y))
-        }
-        if (!xs.length || !ys.length) continue
-        const isProjected = xs.some((v) => Math.abs(v) > 180) || ys.some((v) => Math.abs(v) > 90)
-        if (!isProjected) continue
-        const zoneStr = String(rec.utm_zone || "")
-        const m = zoneStr.match(/\b([1-9]|[1-5]\d|60)\b/)
-        let zone = 0
-        if (m) zone = parseInt(m[1], 10)
-        if (!zone) {
-          const meanEasting = xs.reduce((a, b) => a + b, 0) / xs.length
-          const estLon = (meanEasting - 500000) / 111320 + 78
-          zone = Math.round((estLon + 180) / 6)
-          zone = Math.max(42, Math.min(46, zone))
-        }
-        if (!Number.isFinite(zone) || zone < 1 || zone > 60) {
-          console.warn(`[reprocess] id=${rec.id} invalid zone=${zone}, skipping`)
+        const rr = reprojectRecord({
+          id: Number(rec.id),
+          si_code: rec.si_code ?? null,
+          projection: rec.projection ?? null,
+          utm_zone: rec.utm_zone ?? null,
+          spheroid: rec.spheroid ?? null,
+          basin: rec.basin ?? null,
+          g: [1, 2, 3, 4].map((i) => ({
+            x: rec[`g${i}_x`] != null ? Number(rec[`g${i}_x`]) : null,
+            y: rec[`g${i}_y`] != null ? Number(rec[`g${i}_y`]) : null,
+            il: rec[`g${i}_il`] != null ? Number(rec[`g${i}_il`]) : null,
+            xl: rec[`g${i}_xl`] != null ? Number(rec[`g${i}_xl`]) : null,
+            corner: i,
+          })),
+        })
+        if (!rr.isMapped) {
+          console.warn(`[reprocess] id=${rec.id} could not be mapped, skipping`)
           errors++
           continue
         }
-        const corners: any[] = []
-        let bbox: any = null
-        for (let i = 1; i <= 4; i++) {
-          const x = (rec as any)[`g${i}_x`]
-          const y = (rec as any)[`g${i}_y`]
-          const il = (rec as any)[`g${i}_il`]
-          const xl = (rec as any)[`g${i}_xl`]
-          if (x != null && y != null) {
-            const pt = utmToLatLon(Number(x), Number(y), zone)
-            if (!Number.isFinite(pt.lon) || !Number.isFinite(pt.lat)) {
-              console.warn(`[reprocess] id=${rec.id} g${i}: invalid coords lon=${pt.lon} lat=${pt.lat}, skipping`)
-              continue
-            }
-            corners.push({ lon: pt.lon, lat: pt.lat, il: il != null ? Number(il) : null, xl: xl != null ? Number(xl) : null, easting: Number(x), northing: Number(y), corner: i, is_assumed: false })
-          }
-        }
-        if (corners.length < 2) {
-          console.warn(`[reprocess] id=${rec.id} only ${corners.length} valid corners, skipping`)
-          errors++
-          continue
-        }
-        const lons = corners.map((c: any) => c.lon).filter((v: number) => Number.isFinite(v))
-        const lats = corners.map((c: any) => c.lat).filter((v: number) => Number.isFinite(v))
-        if (lons.length < 2) {
-          errors++
-          continue
-        }
-        bbox = {
-          minLon: clamp(Math.min(...lons), INDIA.minLon, INDIA.maxLon),
-          maxLon: clamp(Math.max(...lons), INDIA.minLon, INDIA.maxLon),
-          minLat: clamp(Math.min(...lats), INDIA.minLat, INDIA.maxLat),
-          maxLat: clamp(Math.max(...lats), INDIA.minLat, INDIA.maxLat),
-        }
-        const notes: string[] = [`Easting/northing converted from UTM to geographic coordinates.`]
-        if (!m || parseInt(m[1], 10) !== zone) notes.push(`UTM zone auto-corrected from "${zoneStr}" to ${zone}.`)
-        const footprintWkt = corners.length >= 3
-          ? wktPolygon(corners.map((c: any) => ({ lon: c.lon, lat: c.lat })))
-          : ""
-        const centroidLon = Number.isFinite(bbox.minLon + bbox.maxLon) ? (bbox.minLon + bbox.maxLon) / 2 : null
-        const centroidLat = Number.isFinite(bbox.minLat + bbox.maxLat) ? (bbox.minLat + bbox.maxLat) / 2 : null
         await query(`
           UPDATE processing_records SET
             utm_zone = $1,
@@ -614,19 +577,29 @@ surveysRouter.post("/reprocess", async (_req, res, next) => {
             is_mapped = $9,
             geometry_status = $10,
             geometry_notes = $11,
-            footprint = ST_GeomFromText($12, 4326),
-            centroid_geom = ST_GeomFromText($13, 4326)
-          WHERE id = $14
+            source_crs = $12,
+            source_epsg = $13,
+            conversion_status = $14,
+            validation_issues = $15,
+            flagged_for_review = $16,
+            footprint = ST_GeomFromText($17, 4326),
+            centroid_geom = ST_GeomFromText($18, 4326)
+          WHERE id = $19
         `, [
-          `UTM zone ${zone}`,
-          JSON.stringify(corners),
-          bbox.minLon, bbox.minLat, bbox.maxLon, bbox.maxLat,
-          centroidLon, centroidLat,
+          rr.crs || `UTM zone ${rec.utm_zone}`,
+          JSON.stringify(rr.corners),
+          rr.bbox?.minLon ?? null, rr.bbox?.minLat ?? null, rr.bbox?.maxLon ?? null, rr.bbox?.maxLat ?? null,
+          rr.centroidLon, rr.centroidLat,
           true,
           "SURVEYED",
-          notes,
-          footprintWkt || null,
-          centroidLon != null && centroidLat != null ? `POINT(${centroidLon} ${centroidLat})` : null,
+          rr.geometryNotes,
+          rr.sourceCrs,
+          rr.sourceEpsg,
+          rr.conversionStatus,
+          rr.validationIssues,
+          rr.flagged,
+          rr.footprintWkt || null,
+          rr.centroidWkt,
           rec.id,
         ])
         fixed++
