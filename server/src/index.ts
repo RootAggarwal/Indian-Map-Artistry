@@ -8,9 +8,13 @@ const PORT = Number(process.env.PORT) || 4000
 
 app.disable("etag")
 app.set("etag", false)
+app.use((req, _res, next) => { console.log(`[request] ${req.method} ${req.url}`); next() })
 
-app.use(cors({ origin: process.env.CLIENT_ORIGIN || "http://localhost:3000" }))
-app.use(express.json({ limit: "5mb" }))
+const allowedOrigins = ["http://localhost:3000", "http://localhost:3001", "http://127.0.0.1:3000", "http://127.0.0.1:3001"]
+const clientOrigin = process.env.CLIENT_ORIGIN
+if (clientOrigin && !allowedOrigins.includes(clientOrigin)) allowedOrigins.push(clientOrigin)
+app.use(cors({ origin: allowedOrigins }))
+app.use(express.json({ limit: "50mb" }))
 
 app.use("/api", router)
 
@@ -35,6 +39,31 @@ async function migrate() {
         ON processing_records USING GIST (footprint)
     `)
 
+    // Auto-heal missing footprint geometries from bbox or centroid
+    await query(`
+      UPDATE processing_records
+      SET footprint = ST_MakeEnvelope(
+        LEAST(bbox_min_lon, bbox_max_lon),
+        LEAST(bbox_min_lat, bbox_max_lat),
+        GREATEST(bbox_min_lon, bbox_max_lon),
+        GREATEST(bbox_min_lat, bbox_max_lat),
+        4326
+      ),
+      is_mapped = true
+      WHERE footprint IS NULL
+        AND bbox_min_lon IS NOT NULL AND bbox_min_lat IS NOT NULL
+        AND bbox_max_lon IS NOT NULL AND bbox_max_lat IS NOT NULL
+        AND GREATEST(bbox_min_lon, bbox_max_lon) > LEAST(bbox_min_lon, bbox_max_lon)
+        AND GREATEST(bbox_min_lat, bbox_max_lat) > LEAST(bbox_min_lat, bbox_max_lat)
+    `)
+    await query(`
+      UPDATE processing_records
+      SET footprint = ST_MakeEnvelope(centroid_lon - 0.05, centroid_lat - 0.05, centroid_lon + 0.05, centroid_lat + 0.05, 4326),
+      is_mapped = true
+      WHERE footprint IS NULL
+        AND centroid_lon IS NOT NULL AND centroid_lat IS NOT NULL
+    `)
+
     await query(`
       CREATE TABLE IF NOT EXISTS interpretation_polygons (
         id SERIAL PRIMARY KEY,
@@ -56,7 +85,40 @@ async function migrate() {
         ON interpretation_polygons USING GIST (geometry)
     `)
 
-    console.log("[migrate] PostGIS schema ready")
+    // Layer management tables
+    await query(`
+      CREATE TABLE IF NOT EXISTS layers (
+        id SERIAL PRIMARY KEY,
+        project_id INTEGER REFERENCES projects(project_id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        description TEXT DEFAULT '',
+        geometry_type TEXT,
+        crs_original TEXT DEFAULT '',
+        style JSONB DEFAULT '{}',
+        visible BOOLEAN DEFAULT true,
+        display_order INTEGER DEFAULT 0,
+        feature_count INTEGER DEFAULT 0,
+        extent JSONB,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `)
+    await query(`
+      CREATE TABLE IF NOT EXISTS layer_features (
+        id BIGSERIAL PRIMARY KEY,
+        layer_id INTEGER NOT NULL REFERENCES layers(id) ON DELETE CASCADE,
+        geometry geometry(Geometry, 4326) NOT NULL,
+        properties JSONB DEFAULT '{}'
+      )
+    `)
+    await query(`
+      CREATE INDEX IF NOT EXISTS idx_lf_layer_id ON layer_features (layer_id)
+    `)
+    await query(`
+      CREATE INDEX IF NOT EXISTS idx_lf_geometry ON layer_features USING GIST (geometry)
+    `)
+
+    console.log("[migrate] PostGIS schema ready & footprints populated")
   } catch (err) {
     console.warn("[migrate] PostGIS migration skipped:", (err as Error).message)
   }

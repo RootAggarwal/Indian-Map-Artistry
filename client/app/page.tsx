@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useMemo, useRef, useState } from "react"
-import { useQuery, useQueryClient } from "@tanstack/react-query"
+import { useQuery, useQueries, useQueryClient } from "@tanstack/react-query"
 import { Activity, Info, RotateCcw, X, Palette, PanelLeftClose, PanelRightClose, PanelBottomClose } from "lucide-react"
 import {
   counts,
@@ -25,7 +25,13 @@ import { EntityPanel } from "@/components/seismic/EntityPanel"
 import { BottomBar } from "@/components/seismic/BottomBar"
 import { DetailsDialog } from "@/components/seismic/DetailsDialog"
 import { AddSurveyDialog } from "@/components/seismic/AddSurveyDialog"
+import LayerPanel from "@/components/seismic/LayerPanel"
+import ShapefileUploader from "@/components/seismic/ShapefileUploader"
+import MapDropOverlay from "@/components/seismic/MapDropOverlay"
 import { useTheme, type ThemeId } from "@/contexts/theme"
+import { fetchLayers, fetchFeatures, updateLayer, deleteLayer, reorderLayers, resetPalette } from "@/lib/layers"
+import type { LayerRecord, LayerStyle } from "@/lib/layers"
+import { useShapefileImport } from "@/lib/useShapefileImport"
 import type { MapTool, ViewMode } from "@/components/seismic/types"
 
 const EMPTY: Record<FacetKey, string[]> = {
@@ -75,7 +81,110 @@ export default function Dashboard() {
   const [bottomOpen, setBottomOpen] = useState(true)
   const [themeMenuOpen, setThemeMenuOpen] = useState(false)
   const [viewMode, setViewMode] = useState<ViewMode>("3d")
+  const [layerPanelOpen, setLayerPanelOpen] = useState(false)
+  const [zoomToLayerSig, setZoomToLayerSig] = useState<{ id: number; nonce: number } | null>(null)
+  const zoomLayerNonce = useRef(0)
   const nonce = useRef(0)
+
+  const layersQuery = useQuery({ queryKey: ["layers"], queryFn: fetchLayers })
+  const layers = layersQuery.data ?? []
+
+  const mapDropDepth = useRef(0)
+  const [mapDragging, setMapDragging] = useState(false)
+
+  const { importing: importingShapefile, status: importStatus, importFiles, dismissStatus } = useShapefileImport({
+    onLayerCreated: (id) => {
+      void layersQuery.refetch()
+      setLayerPanelOpen(true)
+      handleZoomToLayer(id)
+    },
+  })
+
+  function handleMapDragEnter(e: React.DragEvent) {
+    if (!e.dataTransfer?.types?.includes("Files")) return
+    e.preventDefault()
+    mapDropDepth.current += 1
+    setMapDragging(true)
+  }
+
+  function handleMapDragOver(e: React.DragEvent) {
+    if (!e.dataTransfer?.types?.includes("Files")) return
+    e.preventDefault()
+  }
+
+  function handleMapDragLeave(e: React.DragEvent) {
+    e.preventDefault()
+    mapDropDepth.current = Math.max(0, mapDropDepth.current - 1)
+    if (mapDropDepth.current === 0) setMapDragging(false)
+  }
+
+  function handleMapDrop(e: React.DragEvent) {
+    e.preventDefault()
+    mapDropDepth.current = 0
+    setMapDragging(false)
+    if (e.dataTransfer.files.length) {
+      void importFiles(e.dataTransfer.files)
+    }
+  }
+
+  const layerFeatureQueries = useQueries({
+    queries: layers
+      .filter((l) => (l.feature_count ?? 0) > 0)
+      .map((l) => ({
+        queryKey: ["layer-features", l.id],
+        queryFn: () => fetchFeatures(l.id),
+        staleTime: 60_000,
+      })),
+  })
+
+  const layerData = useMemo(() => {
+    const withFeatures = layers.filter((l) => (l.feature_count ?? 0) > 0)
+    return withFeatures.map((l, i) => ({
+      layer: l,
+      features: layerFeatureQueries[i]?.data ?? { type: "FeatureCollection", features: [] },
+    }))
+  }, [layers, layerFeatureQueries])
+
+  async function handleToggleVisibility(id: number) {
+    const lr = layers.find((l) => l.id === id)
+    if (!lr) return
+    await updateLayer(id, { visible: !lr.visible })
+    await layersQuery.refetch()
+  }
+
+  async function handleRemoveLayer(id: number) {
+    await deleteLayer(id)
+    await layersQuery.refetch()
+  }
+
+  async function handleRenameLayer(id: number, name: string) {
+    await updateLayer(id, { name })
+    await layersQuery.refetch()
+  }
+
+  function handleZoomToLayer(id: number) {
+    zoomLayerNonce.current += 1
+    setZoomToLayerSig({ id, nonce: zoomLayerNonce.current })
+  }
+
+  async function handleReorderLayer(id: number, dir: "up" | "down") {
+    const sorted = [...layers].sort((a, b) => a.display_order - b.display_order)
+    const idx = sorted.findIndex((l) => l.id === id)
+    if (idx < 0) return
+    const swap = dir === "up" ? idx - 1 : idx + 1
+    if (swap < 0 || swap >= sorted.length) return
+    const items = [
+      { id, display_order: sorted[swap].display_order },
+      { id: sorted[swap].id, display_order: sorted[idx].display_order },
+    ]
+    await reorderLayers(items)
+    await layersQuery.refetch()
+  }
+
+  async function handleLayerCreated() {
+    await layersQuery.refetch()
+    setLayerPanelOpen(true)
+  }
 
   const all = surveys.data ?? []
 
@@ -233,6 +342,22 @@ export default function Dashboard() {
           <Stat label="Adjusted" value={`${adjusted}`} />
           <Stat label="Year" value={years[yearIndex] ?? "ALL"} />
           <span className="h-5 w-px bg-border" />
+          <button
+            onClick={() => setLayerPanelOpen((o) => !o)}
+            className={`grid h-8 w-8 place-items-center border transition-colors ${
+              layerPanelOpen
+                ? "border-ochre text-ochre bg-ochre/10"
+                : "border-border text-muted-foreground hover:border-ochre hover:text-ochre"
+            }`}
+            title="Toggle layer panel"
+            aria-label="Toggle layer panel"
+          >
+            <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 2L2 7l10 5 10-5-10-5z" />
+              <path d="M2 17l10 5 10-5" />
+              <path d="M2 12l10 5 10-5" />
+            </svg>
+          </button>
           <div className="relative">
             <button
               onClick={() => setThemeMenuOpen(!themeMenuOpen)}
@@ -342,7 +467,13 @@ export default function Dashboard() {
             onToggleBottom={() => setBottomOpen((o) => !o)}
           />
           <div className="flex min-h-0 flex-1">
-            <div className="min-w-0 flex-1 flex flex-col">
+            <div
+              className="relative min-w-0 flex-1 flex flex-col"
+              onDragEnter={handleMapDragEnter}
+              onDragOver={handleMapDragOver}
+              onDragLeave={handleMapDragLeave}
+              onDrop={handleMapDrop}
+            >
               <MapCanvas
                 surveys={filtered}
                 selectedId={activeId}
@@ -352,8 +483,39 @@ export default function Dashboard() {
                 yearFilterActive={timelineYear}
                 viewMode={viewMode}
                 onViewModeChange={setViewMode}
+                layerData={layerData}
+                zoomToLayerSignal={zoomToLayerSig}
+              />
+              <MapDropOverlay
+                dragging={mapDragging}
+                importing={importingShapefile}
+                status={importStatus}
+                onDismissStatus={dismissStatus}
               />
             </div>
+            {layerPanelOpen && (
+              <aside className="hidden w-60 shrink-0 border-l border-border bg-surface lg:flex lg:flex-col">
+                <div className="flex items-center justify-between border-b border-border px-3 py-2">
+                  <h3 className="rail-label text-xs font-semibold uppercase tracking-wider">Layers</h3>
+                  <span className="text-[10px] text-muted-foreground">{layers.length} layer{layers.length !== 1 ? "s" : ""}</span>
+                </div>
+                <ShapefileUploader onLayerCreated={handleLayerCreated} />
+                <div className="flex-1 overflow-y-auto">
+                  <LayerPanel
+                    layers={[...layers].sort((a, b) => a.display_order - b.display_order)}
+                    onToggleVisibility={handleToggleVisibility}
+                    onRemove={handleRemoveLayer}
+                    onRename={handleRenameLayer}
+                    onZoomTo={handleZoomToLayer}
+                    onReorder={handleReorderLayer}
+                    onStyleChange={async (id, style) => {
+                      await updateLayer(id, { style })
+                      await layersQuery.refetch()
+                    }}
+                  />
+                </div>
+              </aside>
+            )}
             {detailsOpen && (
               <aside className="hidden w-72 shrink-0 border-l border-border bg-surface lg:block">
                 <EntityPanel

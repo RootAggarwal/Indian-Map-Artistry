@@ -1,10 +1,11 @@
 "use client"
 
 import { useEffect, useMemo, useRef, useState, useCallback, useLayoutEffect } from "react"
-import { Map as MaplibreMap, NavigationControl, Popup, LngLatBounds } from "maplibre-gl"
+import { Map as MaplibreMap, NavigationControl, Popup, LngLatBounds, setWorkerUrl } from "maplibre-gl"
 import type { GeoJSONSource } from "maplibre-gl"
 import "maplibre-gl/dist/maplibre-gl.css"
 import type { SurveyRecord } from "@/lib/seismic"
+import type { LayerRecord } from "@/lib/layers"
 import { useTheme } from "@/contexts/theme"
 import { MapToolbar } from "./MapToolbar"
 import type { ViewMode, BaseMapStyle } from "./types"
@@ -18,15 +19,19 @@ type Props = {
   yearFilterActive: string | null
   viewMode: ViewMode
   onViewModeChange: (v: ViewMode) => void
+  layerData: { layer: LayerRecord; features: GeoJSON.FeatureCollection }[]
+  zoomToLayerSignal: { id: number; nonce: number } | null
 }
+
+setWorkerUrl("/maplibre-gl-worker.mjs")
 
 const TILE_SOURCES: Record<BaseMapStyle, { tiles: string[]; attribution: string }> = {
   dark: {
-    tiles: ["https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"],
+    tiles: ["https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{ratio}.png"],
     attribution: "&copy; <a href=\"https://www.openstreetmap.org/copyright\">OSM</a> &copy; <a href=\"https://carto.com/\">CARTO</a>",
   },
   light: {
-    tiles: ["https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"],
+    tiles: ["https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}{ratio}.png"],
     attribution: "&copy; <a href=\"https://www.openstreetmap.org/copyright\">OSM</a> &copy; <a href=\"https://carto.com/\">CARTO</a>",
   },
   osm: {
@@ -40,28 +45,15 @@ const TILE_SOURCES: Record<BaseMapStyle, { tiles: string[]; attribution: string 
 }
 
 function makeBaseStyle(baseStyle: BaseMapStyle, _isDark: boolean): any {
-  const tile = TILE_SOURCES[baseStyle]
   const bg = baseStyle === "dark" || baseStyle === "satellite" ? "#0f172a" : "#f8fafc"
   return {
     version: 8,
-    sources: {
-      "base-tiles": {
-        type: "raster",
-        tiles: tile.tiles,
-        tileSize: 256,
-        attribution: tile.attribution,
-      },
-    },
+    sources: {},
     layers: [
       {
         id: "background",
         type: "background",
         paint: { "background-color": bg },
-      },
-      {
-        id: "base-tiles",
-        type: "raster",
-        source: "base-tiles",
       },
     ],
   }
@@ -75,67 +67,60 @@ export function MapCanvas({
   resetSignal,
   viewMode,
   onViewModeChange,
+  layerData,
+  zoomToLayerSignal,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const mapRef = useRef<MaplibreMap | null>(null)
   const popupRef = useRef<Popup | null>(null)
   const resizeRef = useRef<ResizeObserver | null>(null)
   const [mapReady, setMapReady] = useState(false)
+  const [basemapOffline, setBasemapOffline] = useState(false)
+  const mapBasemapRef = useRef<{ current: boolean } | null>(null)
+  const baseStyleNonce = useRef(0)
   const { isDark } = useTheme()
   const [baseStyle, setBaseStyle] = useState<BaseMapStyle>(isDark ? "dark" : "light")
 
   const geojson = useMemo(() => {
-    console.log(`[MapCanvas] geojson recompute: ${surveys.length} surveys`)
     const features: any[] = []
-    for (const s of surveys) {
-      if (!s.is_mapped || !s.footprint_geojson) continue
-      let geom: any
-      try {
-        geom = JSON.parse(s.footprint_geojson)
-      } catch {
-        continue
-      }
-      if (!geom || geom.type !== "Polygon") continue
-      features.push({
-        type: "Feature",
-        id: s.id,
-        properties: {
-          id: s.id,
-          project_id: s.project_id,
-          project_name: s.projects?.project_name,
-          si_code: s.si_code,
-          basin: s.projects?.basin,
-          project_year: s.project_year,
-          data_dimension: s.projects?.data_dimension,
-          type_of_processing: s.type_of_processing,
-          flagged: s.flagged_for_review,
-        },
-        geometry: geom,
-      })
-    }
-
     const lineFeatures: any[] = []
+    const propsOf = (s: SurveyRecord) => ({
+      id: s.id,
+      project_id: s.project_id,
+      project_name: s.projects?.project_name,
+      si_code: s.si_code,
+      basin: s.projects?.basin,
+      project_year: s.project_year,
+      data_dimension: s.projects?.data_dimension,
+      type_of_processing: s.type_of_processing,
+      flagged: s.flagged_for_review,
+    })
     for (const s of surveys) {
-      if (s.projects?.data_dimension !== "2D") continue
-      const corners = s.corners?.filter((c) => c.lat != null && c.lon != null) ?? []
-      if (corners.length < 2) continue
-      const coords: [number, number][] = corners.map((c) => [c.lon!, c.lat!])
-      lineFeatures.push({
-        type: "Feature",
-        id: `line-${s.id}`,
-        properties: {
-          id: s.id,
-          project_id: s.project_id,
-          project_name: s.projects?.project_name,
-          si_code: s.si_code,
-          basin: s.projects?.basin,
-          project_year: s.project_year,
-          data_dimension: "2D",
-          type_of_processing: s.type_of_processing,
-          flagged: s.flagged_for_review,
-        },
-        geometry: { type: "LineString", coordinates: coords },
-      })
+      let geom: any = null
+      if (s.footprint_geojson) {
+        try {
+          geom = JSON.parse(s.footprint_geojson)
+        } catch {}
+      }
+      if (!geom) continue
+
+      if (geom.type === "Polygon" || geom.type === "MultiPolygon") {
+        features.push({ type: "Feature", id: s.id, properties: propsOf(s), geometry: geom })
+      } else if (geom.type === "LineString") {
+        lineFeatures.push({
+          type: "Feature",
+          id: `line-${s.id}`,
+          properties: propsOf(s),
+          geometry: geom,
+        })
+      } else if (geom.type === "Point") {
+        lineFeatures.push({
+          type: "Feature",
+          id: `pt-${s.id}`,
+          properties: propsOf(s),
+          geometry: geom,
+        })
+      }
     }
 
     return { polygonFeatures: features, lineFeatures }
@@ -153,15 +138,21 @@ export function MapCanvas({
       container,
       style: makeBaseStyle(baseStyle, isDark),
       center: [82.5, 22.5],
-      zoom: 4,
+      zoom: 5,
       attributionControl: false,
       renderWorldCopies: false,
     })
 
     map.addControl(new NavigationControl({ showZoom: true, showCompass: false }), "bottom-right")
+    map.resize()
 
-    map.on("load", () => {
+    if (process.env.NODE_ENV !== "production") {
+      ;(window as unknown as Record<string, unknown>).__map = map
+    }
+
+    function initLayers() {
       try {
+        if (map.getSource("india-boundary")) return
         map.addSource("india-boundary", {
           type: "geojson",
           data: "/data/india-boundary.json",
@@ -196,15 +187,15 @@ export function MapCanvas({
               "case",
               ["boolean", ["get", "flagged"], false],
               isDark ? "#b91c1c" : "#dc2626",
-              isDark ? "#2d6a8f" : "#3b82f6",
+              isDark ? "#2d6a8f" : "#2563eb",
             ],
             "fill-opacity": [
               "case",
               ["boolean", ["feature-state", "selected"], false],
-              0.55,
+              0.65,
               ["boolean", ["feature-state", "dimmed"], false],
-              0.08,
-              0.28,
+              0.15,
+              0.45,
             ],
           },
         })
@@ -219,13 +210,13 @@ export function MapCanvas({
               isDark ? "#fbbf24" : "#d97706",
               ["boolean", ["get", "flagged"], false],
               isDark ? "#ef4444" : "#dc2626",
-              isDark ? "#60a5fa" : "#2563eb",
+              isDark ? "#60a5fa" : "#1d4ed8",
             ],
             "line-width": [
               "case",
               ["boolean", ["feature-state", "selected"], false],
-              2.5,
-              0.7,
+              3,
+              1.5,
             ],
           },
         })
@@ -235,7 +226,7 @@ export function MapCanvas({
           id: "survey-line-2d",
           type: "line",
           source: "survey-lines",
-          layout: { visibility: "none" },
+          layout: { visibility: "visible" },
           paint: {
             "line-color": [
               "case",
@@ -248,8 +239,8 @@ export function MapCanvas({
             "line-width": [
               "case",
               ["boolean", ["feature-state", "selected"], false],
-              2.5,
-              1,
+              3,
+              1.5,
             ],
           },
         })
@@ -257,13 +248,13 @@ export function MapCanvas({
           id: "survey-point-2d",
           type: "circle",
           source: "survey-lines",
-          layout: { visibility: "none" },
+          layout: { visibility: "visible" },
           paint: {
             "circle-radius": [
               "case",
               ["boolean", ["feature-state", "selected"], false],
-              4,
-              2.5,
+              5,
+              3,
             ],
             "circle-color": [
               "case",
@@ -272,21 +263,47 @@ export function MapCanvas({
               isDark ? "#34d399" : "#059669",
             ],
             "circle-stroke-color": isDark ? "#1e293b" : "#ffffff",
-            "circle-stroke-width": 0.5,
+            "circle-stroke-width": 1,
           },
         })
 
-        map.setLayoutProperty("survey-fill", "visibility", viewMode === "3d" ? "visible" : "none")
-        map.setLayoutProperty("survey-outline", "visibility", viewMode === "3d" ? "visible" : "none")
+        map.setLayoutProperty("survey-fill", "visibility", "visible")
+        map.setLayoutProperty("survey-outline", "visibility", "visible")
 
         setMapReady(true)
-        console.log("[MapCanvas] ready")
       } catch (err) {
         console.error("[MapCanvas] init error:", err)
       }
-    })
+    }
 
-    map.on("error", (e) => console.error("[MapCanvas] map error:", e))
+    map.on("load", initLayers)
+
+    const fallbackTimer = setTimeout(() => {
+      if (!mapRef.current || mapReady) return
+      try { initLayers() } catch { setMapReady(true) }
+    }, 5000)
+
+    const basemapOfflineRef = { current: false }
+    map.on("error", (e) => {
+      const msg = String((e as any)?.error?.message ?? "")
+      const isTileError = Boolean((e as any)?.tile) || (e as any)?.sourceId === "base-tiles"
+      const isNetworkError = /fetch|network|load|tile|status 404|Failed to/i.test(msg)
+
+      if (isTileError || isNetworkError) {
+        if (basemapOfflineRef.current) return
+        basemapOfflineRef.current = true
+        console.warn("[MapCanvas] basemap tiles unreachable — switching to plain background")
+        try {
+          if (map.getLayer("base-tiles")) map.removeLayer("base-tiles")
+          if (map.getSource("base-tiles")) map.removeSource("base-tiles")
+        } catch {}
+        setBasemapOffline(true)
+        return
+      }
+
+      console.warn("[MapCanvas] map error:", msg || e)
+    })
+    mapBasemapRef.current = basemapOfflineRef
 
     map.on("click", "survey-fill", (e) => {
       if (!e.features?.[0]) return
@@ -305,11 +322,21 @@ export function MapCanvas({
         if (rec) onSelect(rec)
       }
     })
+    map.on("click", "survey-point-2d", (e) => {
+      if (!e.features?.[0]) return
+      const id = e.features[0].properties?.id
+      if (id != null) {
+        const rec = surveys.find((s) => s.id === id)
+        if (rec) onSelect(rec)
+      }
+    })
 
     map.on("mouseenter", "survey-fill", () => { map.getCanvas().style.cursor = "pointer" })
     map.on("mouseleave", "survey-fill", () => { map.getCanvas().style.cursor = "" })
     map.on("mouseenter", "survey-line-2d", () => { map.getCanvas().style.cursor = "pointer" })
     map.on("mouseleave", "survey-line-2d", () => { map.getCanvas().style.cursor = "" })
+    map.on("mouseenter", "survey-point-2d", () => { map.getCanvas().style.cursor = "pointer" })
+    map.on("mouseleave", "survey-point-2d", () => { map.getCanvas().style.cursor = "" })
 
     const popupHtml = (p: any) => `<div class="px-3 py-2 text-xs" style="font-family:var(--font-sans);min-width:180px">
       <div style="font-family:var(--font-mono);font-size:0.625rem;letter-spacing:0.16em;text-transform:uppercase;color:var(--muted-foreground);margin-bottom:4px">${p.si_code || "SIG —"}</div>
@@ -342,19 +369,30 @@ export function MapCanvas({
     map.on("mouseleave", "survey-line-2d", () => {
       if (popupRef.current) { popupRef.current.remove(); popupRef.current = null }
     })
+    map.on("mousemove", "survey-point-2d", (e) => {
+      if (!e.features?.[0] || !map) return
+      if (popupRef.current) popupRef.current.remove()
+      popupRef.current = new Popup({ closeButton: false, closeOnClick: false, offset: 10 })
+        .setLngLat(e.lngLat)
+        .setHTML(popupHtml(e.features[0].properties))
+        .addTo(map)
+    })
+    map.on("mouseleave", "survey-point-2d", () => {
+      if (popupRef.current) { popupRef.current.remove(); popupRef.current = null }
+    })
 
     mapRef.current = map
 
     const ro = new ResizeObserver(() => {
       if (mapRef.current) {
         mapRef.current.resize()
-        if (!mapReady) console.log("[MapCanvas] resize after init", container.offsetHeight)
       }
     })
     ro.observe(container.parentElement || container)
     resizeRef.current = ro
 
     return () => {
+      clearTimeout(fallbackTimer)
       ro.disconnect()
       mapRef.current?.remove()
       mapRef.current = null
@@ -369,42 +407,50 @@ export function MapCanvas({
     if (!mapRef.current || !mapReady) return
     const map = mapRef.current
     const tile = TILE_SOURCES[baseStyle]
+    const nonce = ++baseStyleNonce.current
     if (map.getLayer("base-tiles")) map.removeLayer("base-tiles")
     if (map.getSource("base-tiles")) map.removeSource("base-tiles")
-    map.addSource("base-tiles", {
-      type: "raster",
-      tiles: tile.tiles,
-      tileSize: 256,
-      attribution: tile.attribution,
-    })
-    map.addLayer({ id: "base-tiles", type: "raster", source: "base-tiles" }, "india-fill")
-  }, [baseStyle, mapReady])
+    if (mapBasemapRef.current) mapBasemapRef.current.current = false
+    setBasemapOffline(false)
 
-  useEffect(() => {
-    return () => {
-      resizeRef.current?.disconnect()
-      mapRef.current?.remove()
-      mapRef.current = null
-    }
-  }, [])
+    const probeUrl = tile.tiles[0]
+      .replace("{z}", "0").replace("{x}", "0").replace("{y}", "0").replace("{ratio}", "")
+    const probe = fetch(probeUrl, { mode: "cors" })
+      .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`) })
+      .catch(() => { throw new Error("unreachable") })
+
+    void probe
+      .then(() => {
+        if (nonce !== baseStyleNonce.current || !mapRef.current) return
+        if (map.getLayer("base-tiles")) map.removeLayer("base-tiles")
+        if (map.getSource("base-tiles")) map.removeSource("base-tiles")
+        map.addSource("base-tiles", {
+          type: "raster",
+          tiles: tile.tiles,
+          tileSize: 256,
+          attribution: tile.attribution,
+        })
+        map.addLayer({ id: "base-tiles", type: "raster", source: "base-tiles" }, "india-fill")
+      })
+      .catch(() => {
+        if (nonce !== baseStyleNonce.current) return
+        if (mapBasemapRef.current) mapBasemapRef.current.current = true
+        setBasemapOffline(true)
+      })
+  }, [baseStyle, mapReady])
 
   useEffect(() => {
     if (!mapRef.current || !mapReady) return
     const map = mapRef.current
     const polygonCount = geojson.polygonFeatures.length
     const lineCount = geojson.lineFeatures.length
-    console.log(`[MapCanvas] setData: ${polygonCount} polygons, ${lineCount} lines`)
     const src = map.getSource("survey-polygons") as GeoJSONSource
     if (src) {
       src.setData({ type: "FeatureCollection", features: geojson.polygonFeatures })
-    } else {
-      console.warn("[MapCanvas] survey-polygons source not found")
     }
     const lineSrc = map.getSource("survey-lines") as GeoJSONSource
     if (lineSrc) {
       lineSrc.setData({ type: "FeatureCollection", features: geojson.lineFeatures })
-    } else {
-      console.warn("[MapCanvas] survey-lines source not found")
     }
   }, [geojson, mapReady])
 
@@ -420,13 +466,14 @@ export function MapCanvas({
     if (selectedId != null) {
       map.setFeatureState({ source: "survey-polygons", id: selectedId }, { selected: true, dimmed: false })
       map.setFeatureState({ source: "survey-lines", id: `line-${selectedId}` }, { selected: true, dimmed: false })
+      map.setFeatureState({ source: "survey-lines", id: `pt-${selectedId}` }, { selected: true, dimmed: false })
       for (const f of geojson.polygonFeatures) {
-        if (f.id !== selectedId && f.id !== `line-${selectedId}`) {
+        if (f.id !== selectedId && f.id !== `line-${selectedId}` && f.id !== `pt-${selectedId}`) {
           map.setFeatureState({ source: "survey-polygons", id: f.id }, { dimmed: true })
         }
       }
       for (const f of geojson.lineFeatures) {
-        if (f.id !== selectedId && f.id !== `line-${selectedId}`) {
+        if (f.id !== selectedId && f.id !== `line-${selectedId}` && f.id !== `pt-${selectedId}`) {
           map.setFeatureState({ source: "survey-lines", id: f.id }, { dimmed: true })
         }
       }
@@ -447,11 +494,168 @@ export function MapCanvas({
   useEffect(() => {
     if (!mapRef.current || !mapReady) return
     const map = mapRef.current
-    map.setLayoutProperty("survey-fill", "visibility", viewMode === "3d" ? "visible" : "none")
-    map.setLayoutProperty("survey-outline", "visibility", viewMode === "3d" ? "visible" : "none")
-    map.setLayoutProperty("survey-line-2d", "visibility", viewMode === "2d" ? "visible" : "none")
-    map.setLayoutProperty("survey-point-2d", "visibility", viewMode === "2d" ? "visible" : "none")
+    map.setLayoutProperty("survey-fill", "visibility", "visible")
+    map.setLayoutProperty("survey-outline", "visibility", "visible")
+    map.setLayoutProperty("survey-line-2d", "visibility", "visible")
+    map.setLayoutProperty("survey-point-2d", "visibility", "visible")
   }, [viewMode, mapReady])
+
+  // ── Uploaded layers rendering ──────────────────────────────────
+  useEffect(() => {
+    if (!mapRef.current || !mapReady) return
+    const map = mapRef.current
+
+    const existing = map.getStyle().layers?.filter((l) => l.id.startsWith("uploaded-")) ?? []
+    for (const l of existing) {
+      try { if (map.getLayer(l.id)) map.removeLayer(l.id) } catch {}
+    }
+    const srcKeys = Object.keys(map.getStyle().sources ?? {})
+    for (const sid of srcKeys) {
+      if (sid.startsWith("uploaded-")) {
+        try { if (map.getSource(sid)) map.removeSource(sid) } catch {}
+      }
+    }
+
+    const beforeId = map.getLayer("survey-fill") ? "survey-fill" : undefined
+
+    for (const { layer: lr, features } of layerData) {
+      if (!features.features.length) continue
+      const sid = `uploaded-src-${lr.id}`
+      const vis = (lr.visible !== false) ? "visible" : "none"
+      const c = lr.style?.color ?? "#888"
+      const o = lr.style?.opacity ?? 0.6
+      const oc = lr.style?.outline_color ?? "#000"
+      const ow = lr.style?.outline_width ?? 1
+      const gt = lr.geometry_type ?? features.features[0]?.geometry?.type ?? ""
+
+      map.addSource(sid, { type: "geojson", data: features })
+
+      const isPoly = gt.includes("Polygon") || gt === "MultiPolygon"
+      const isLine = gt.includes("Line") || gt === "MultiLineString"
+      const isPoint = gt.includes("Point") || gt === "MultiPoint"
+
+      if (isPoly || (!isLine && !isPoint)) {
+        map.addLayer({
+          id: `uploaded-fill-${lr.id}`, type: "fill",
+          source: sid,
+          layout: { visibility: vis },
+          paint: { "fill-color": c, "fill-opacity": o },
+        }, beforeId)
+        map.addLayer({
+          id: `uploaded-outline-${lr.id}`, type: "line",
+          source: sid,
+          layout: { visibility: vis },
+          paint: { "line-color": oc, "line-width": ow, "line-opacity": 0.85 },
+        }, beforeId)
+      }
+      if (isLine) {
+        map.addLayer({
+          id: `uploaded-line-${lr.id}`, type: "line",
+          source: sid,
+          layout: { visibility: vis },
+          paint: { "line-color": c, "line-width": ow * 2, "line-opacity": o },
+        }, beforeId)
+      }
+      if (isPoint) {
+        map.addLayer({
+          id: `uploaded-point-${lr.id}`, type: "circle",
+          source: sid,
+          layout: { visibility: vis },
+          paint: {
+            "circle-radius": 5, "circle-color": c,
+            "circle-opacity": o, "circle-stroke-color": oc,
+            "circle-stroke-width": 1,
+          },
+        }, beforeId)
+      }
+    }
+
+    // Generic hover & popup for uploaded layers
+    const uploadLayerIds = map.getStyle().layers
+      ?.filter((l) => l.id.startsWith("uploaded-"))
+      .map((l) => l.id) ?? []
+
+    if (uploadLayerIds.length && popupRef.current) {
+      popupRef.current.remove()
+      popupRef.current = null
+    }
+
+    for (const lid of uploadLayerIds) {
+      map.on("mouseenter", lid, () => { map.getCanvas().style.cursor = "pointer" })
+      map.on("mouseleave", lid, () => { map.getCanvas().style.cursor = "" })
+      map.on("mousemove", lid, (e) => {
+        if (!e.features?.[0] || !map) return
+        if (popupRef.current) popupRef.current.remove()
+        const p = e.features[0].properties ?? {}
+        const rows = Object.entries(p)
+          .filter(([k]) => !k.startsWith("_"))
+          .slice(0, 15)
+          .map(([k, v]) => `<tr><td class="pr-2 font-semibold">${k}</td><td>${v ?? "—"}</td></tr>`)
+          .join("")
+        popupRef.current = new Popup({ closeButton: false, closeOnClick: false, offset: 10 })
+          .setLngLat(e.lngLat)
+          .setHTML(`<table class="text-xs" style="font-family:var(--font-sans)">${rows}</table>`)
+          .addTo(map)
+      })
+      map.on("mouseleave", lid, () => {
+        if (popupRef.current) { popupRef.current.remove(); popupRef.current = null }
+      })
+    }
+
+    return () => {
+      // cleanup is handled by re-run of this effect
+    }
+  }, [layerData, mapReady])
+
+  // ── Zoom to layer ─────────────────────────────────────────────
+  const pendingZoomRef = useRef<number | null>(null)
+
+  const zoomToUploaded = useCallback(async (id: number) => {
+    if (!mapRef.current || !mapReady) return
+    const map = mapRef.current
+    const srcId = `uploaded-src-${id}`
+    const src = map.getSource(srcId) as GeoJSONSource | undefined
+    if (!src) {
+      pendingZoomRef.current = id
+      return
+    }
+    pendingZoomRef.current = null
+    try {
+      const data = (await src.getData()) as GeoJSON.FeatureCollection
+      if (!data?.features?.length) return
+      const bounds = new LngLatBounds()
+      const extendCoords = (coords: unknown): void => {
+        if (typeof coords === "number" || coords == null) return
+        if (Array.isArray(coords)) {
+          if (typeof coords[0] === "number" && typeof coords[1] === "number") {
+            const [x, y] = coords as unknown as [number, number]
+            if (x >= -180 && x <= 180 && y >= -90 && y <= 90) bounds.extend([x, y])
+            return
+          }
+          ;(coords as unknown[]).forEach(extendCoords)
+        }
+      }
+      for (const f of data.features) {
+        if (!f.geometry) continue
+        extendCoords((f.geometry as any).coordinates)
+      }
+      if (!bounds.isEmpty()) map.fitBounds(bounds, { padding: 60, duration: 600 })
+    } catch {}
+  }, [mapReady])
+
+  useEffect(() => {
+    if (!zoomToLayerSignal || !mapReady) return
+    zoomToUploaded(zoomToLayerSignal.id)
+  }, [zoomToLayerSignal, mapReady, zoomToUploaded])
+
+  useEffect(() => {
+    if (pendingZoomRef.current == null || !mapReady) return
+    const id = pendingZoomRef.current
+    const srcId = `uploaded-src-${id}`
+    const src = mapRef.current?.getSource(srcId)
+    if (!src) return
+    zoomToUploaded(id)
+  }, [layerData, mapReady, zoomToUploaded])
 
   const zoomToSurvey = useCallback((id: number) => {
     if (!mapRef.current) return
@@ -487,11 +691,11 @@ export function MapCanvas({
 
   useEffect(() => {
     if (selectedId != null && mapReady) zoomToSurvey(selectedId)
-  }, [selectedId, mapReady])
+  }, [selectedId, mapReady, zoomToSurvey])
 
   return (
-    <div className="relative h-full w-full overflow-hidden">
-      <div ref={containerRef} className="h-full w-full" />
+    <div className="relative flex flex-1 min-h-0 w-full">
+      <div ref={containerRef} className="flex-1 min-h-0" />
       {mapReady && (
         <MapToolbar
           viewMode={viewMode}
@@ -503,6 +707,11 @@ export function MapCanvas({
       <div className="pointer-events-none absolute bottom-3 left-3 rail-label bg-ink/80 px-2 py-1 z-10">
         {geojson.polygonFeatures.length + geojson.lineFeatures.length} surveys
       </div>
+      {basemapOffline && (
+        <div className="pointer-events-none absolute top-3 left-1/2 z-10 -translate-x-1/2 rail-label rounded border border-rust/50 bg-ink/85 px-3 py-1.5 text-[0.68rem] text-foreground/85">
+          Basemap tiles unreachable — showing plain background (local layers unaffected)
+        </div>
+      )}
     </div>
   )
 }
