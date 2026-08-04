@@ -42,3 +42,10 @@ dist/
 *.tsbuildinfo
 *.xlsx
 zip.zip
+
+# OpenCode
+.opencode/
+
+# Temporary scripts
+fix_crs.py
+fix_crs_v2.py
