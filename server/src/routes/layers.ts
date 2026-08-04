@@ -36,6 +36,33 @@ layersRouter.post("/", async (req, res, next) => {
   }
 })
 
+// GET /api/layers/batch/features?ids=1,4,7 — bulk fetch features for multiple layers
+layersRouter.get("/batch/features", async (req, res, next) => {
+  try {
+    const idsParam = z.string().min(1).parse(req.query.ids)
+    const ids = idsParam.split(",").map(Number).filter((n) => Number.isInteger(n) && n > 0)
+    if (ids.length === 0) { res.json({ layers: {} }); return }
+    const r = await query(
+      `SELECT layer_id, id, ST_AsGeoJSON(geometry, 9) AS geojson, properties
+       FROM layer_features WHERE layer_id = ANY($1::int[]) ORDER BY layer_id, id`,
+      [ids],
+    )
+    const layers: Record<string, { type: "FeatureCollection"; features: any[] }> = {}
+    for (const id of ids) layers[String(id)] = { type: "FeatureCollection", features: [] }
+    for (const row of r.rows as any[]) {
+      const key = String(row.layer_id)
+      layers[key].features.push({
+        type: "Feature",
+        geometry: JSON.parse(row.geojson),
+        properties: { ...(row.properties ?? {}), _feature_id: row.id },
+      })
+    }
+    res.json({ layers })
+  } catch (err) {
+    next(err)
+  }
+})
+
 // GET /api/layers — list all layers (metadata only, no features)
 layersRouter.get("/", async (_req, res, next) => {
   try {

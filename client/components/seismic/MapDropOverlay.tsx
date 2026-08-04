@@ -39,6 +39,9 @@ export default function MapDropOverlay({ dragging, importing, status, onDismissS
             )}
             <p className="mt-2 text-xs text-foreground">{status!.message}</p>
             {status!.error && <p className="mt-1 text-[0.7rem] text-destructive break-words">{status!.error}</p>}
+            {status!.warnings?.map((w) => (
+              <p key={w} className="mt-1 text-[0.7rem] text-amber-500 break-words">⚠ {w}</p>
+            ))}
             <button
               onClick={onDismissStatus}
               className="pointer-events-auto mt-2 inline-flex items-center gap-1 rounded border border-border px-2 py-1 text-[0.7rem] text-muted-foreground hover:text-foreground"

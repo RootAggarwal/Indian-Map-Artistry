@@ -1,14 +1,16 @@
 "use client"
 
 import { useState, useCallback } from "react"
-import { AlertTriangle, FileText, Printer, Pencil, X, Check } from "lucide-react"
+import { AlertTriangle, FileText, Printer, Pencil, X, Check, Eye, EyeOff } from "lucide-react"
 import { useQueryClient } from "@tanstack/react-query"
 import type { ReportRow, SurveyRecord, SurveyUpdate } from "@/lib/seismic"
 import { updateSurvey } from "@/lib/seismic"
+import type { InterpretationRecord } from "@/lib/interpretations"
 
 type Props = {
   rec: SurveyRecord | null
   reports: ReportRow[]
+  interpretations: InterpretationRecord[]
   onPrint: () => void
   onOpenDetails: () => void
 }
@@ -76,7 +78,7 @@ function SingleFieldEditor({ field, value, onChange }: { field: FieldDef; value:
   )
 }
 
-export function EntityPanel({ rec, reports, onPrint, onOpenDetails }: Props) {
+export function EntityPanel({ rec, reports, interpretations, onPrint, onOpenDetails }: Props) {
   const queryClient = useQueryClient()
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState<Record<string, string>>({})
@@ -231,6 +233,36 @@ export function EntityPanel({ rec, reports, onPrint, onOpenDetails }: Props) {
             </tr>
           </tbody>
         </table>
+
+        {interpretations.length > 0 && (
+          <div className="border-b border-border/70 px-3 py-2">
+            <p className="rail-label mb-1.5 flex items-center gap-1.5">
+              Interpretation polygons
+              <span className="text-[0.6rem] text-muted-foreground">({interpretations.length})</span>
+            </p>
+            <ul className="space-y-1">
+              {interpretations.map((ip) => (
+                <li key={ip.id} className="flex items-center gap-2 text-[0.72rem]">
+                  <span
+                    className="h-2.5 w-2.5 shrink-0 rounded-sm border border-border"
+                    style={{ backgroundColor: ip.color }}
+                  />
+                  <span className="min-w-0 flex-1 truncate text-foreground">
+                    {ip.name ?? ip.si_code ?? `Polygon #${ip.id}`}
+                  </span>
+                  {ip.processing_type && (
+                    <span className="shrink-0 text-[0.6rem] text-muted-foreground">{ip.processing_type}</span>
+                  )}
+                  {ip.visible ? (
+                    <Eye className="h-3 w-3 shrink-0 text-muted-foreground" />
+                  ) : (
+                    <EyeOff className="h-3 w-3 shrink-0 text-muted-foreground/50" />
+                  )}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
 
         {rec.geometry_notes?.length > 0 && (
           <div className="m-3 border border-rust/40 bg-rust/10 p-3">

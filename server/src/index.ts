@@ -1,5 +1,7 @@
 import express from "express"
 import cors from "cors"
+import helmet from "helmet"
+import { ZodError } from "zod"
 import { query } from "./db.js"
 import { router } from "./routes/index.js"
 
@@ -8,6 +10,20 @@ const PORT = Number(process.env.PORT) || 4000
 
 app.disable("etag")
 app.set("etag", false)
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'"],
+      styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+      fontSrc: ["'self'", "https://fonts.gstatic.com"],
+      imgSrc: ["'self'", "data:", "blob:", "https://*.tile.openstreetmap.org", "https://*.basemaps.cartocdn.com", "https://server.arcgisonline.com", "https://images.unsplash.com"],
+      connectSrc: ["'self'", "http://localhost:4000"],
+      workerSrc: ["'self'", "blob:"],
+      childSrc: ["'self'", "blob:"],
+    },
+  },
+}))
 app.use((req, _res, next) => { console.log(`[request] ${req.method} ${req.url}`); next() })
 
 const allowedOrigins = ["http://localhost:3000", "http://localhost:3001", "http://127.0.0.1:3000", "http://127.0.0.1:3001"]
@@ -19,6 +35,10 @@ app.use(express.json({ limit: "50mb" }))
 app.use("/api", router)
 
 app.use((err: any, req: any, res: any, next: any) => {
+  if (err instanceof ZodError) {
+    res.status(400).json({ error: "Validation failed", issues: err.issues })
+    return
+  }
   console.error("[server] unhandled error:", err?.message ?? err)
   if (res.headersSent) return next(err)
   res.status(err?.statusCode || 500).json({
@@ -37,6 +57,41 @@ async function migrate() {
     await query(`
       CREATE INDEX IF NOT EXISTS idx_pr_footprint
         ON processing_records USING GIST (footprint)
+    `)
+
+    // Interpretation polygons — additive schema (idempotent)
+    await query(`
+      CREATE TABLE IF NOT EXISTS interpretation_polygons (
+        id serial PRIMARY KEY,
+        si_code text,
+        name text,
+        description text,
+        color text NOT NULL DEFAULT '#f97316',
+        opacity real NOT NULL DEFAULT 0.4,
+        visible boolean NOT NULL DEFAULT true,
+        processing_type text,
+        project_year text,
+        geometry geometry(Geometry, 4326) NOT NULL,
+        properties jsonb NOT NULL DEFAULT '{}'::jsonb,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        updated_at timestamptz NOT NULL DEFAULT now()
+      )
+    `)
+    await query(`
+      ALTER TABLE interpretation_polygons
+        ADD COLUMN IF NOT EXISTS name text,
+        ADD COLUMN IF NOT EXISTS description text,
+        ADD COLUMN IF NOT EXISTS color text NOT NULL DEFAULT '#f97316',
+        ADD COLUMN IF NOT EXISTS opacity real NOT NULL DEFAULT 0.4,
+        ADD COLUMN IF NOT EXISTS visible boolean NOT NULL DEFAULT true
+    `)
+    await query(`
+      ALTER TABLE interpretation_polygons
+        ALTER COLUMN geometry TYPE geometry(Geometry, 4326) USING geometry::geometry
+    `)
+    await query(`
+      CREATE INDEX IF NOT EXISTS idx_ip_geometry
+        ON interpretation_polygons USING GIST (geometry)
     `)
 
     // Auto-heal missing footprint geometries from bbox or centroid
@@ -132,7 +187,18 @@ process.on("uncaughtException", (err) => {
 })
 
 migrate().then(() => {
-  app.listen(PORT, () => {
+  const server = app.listen(PORT, () => {
     console.log(`[server] listening on http://localhost:${PORT}`)
   })
+
+  const shutdown = (signal: string) => {
+    console.log(`[server] ${signal} received — closing connections`)
+    server.close(() => {
+      console.log("[server] closed")
+      process.exit(0)
+    })
+    setTimeout(() => process.exit(1), 5000)
+  }
+  process.on("SIGTERM", () => shutdown("SIGTERM"))
+  process.on("SIGINT", () => shutdown("SIGINT"))
 })

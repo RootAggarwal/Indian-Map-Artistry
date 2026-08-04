@@ -6,6 +6,7 @@ import type { GeoJSONSource } from "maplibre-gl"
 import "maplibre-gl/dist/maplibre-gl.css"
 import type { SurveyRecord } from "@/lib/seismic"
 import type { LayerRecord } from "@/lib/layers"
+import type { InterpretationRecord } from "@/lib/interpretations"
 import { useTheme } from "@/contexts/theme"
 import { MapToolbar } from "./MapToolbar"
 import type { ViewMode, BaseMapStyle } from "./types"
@@ -21,6 +22,14 @@ type Props = {
   onViewModeChange: (v: ViewMode) => void
   layerData: { layer: LayerRecord; features: GeoJSON.FeatureCollection }[]
   zoomToLayerSignal: { id: number; nonce: number } | null
+  interpretations?: InterpretationRecord[]
+  linkedSurveyIds?: number[] | null
+  drawActive?: boolean
+  drawPoints?: [number, number][]
+  drawColor?: string
+  onDrawPoint?: (lng: number, lat: number) => void
+  onDrawDone?: () => void
+  onDrawCancel?: () => void
 }
 
 setWorkerUrl("/maplibre-gl-worker.mjs")
@@ -42,6 +51,15 @@ const TILE_SOURCES: Record<BaseMapStyle, { tiles: string[]; attribution: string 
     tiles: ["https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"],
     attribution: "&copy; Esri",
   },
+}
+
+function escapeHtml(v: unknown): string {
+  return String(v ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;")
 }
 
 function makeBaseStyle(baseStyle: BaseMapStyle, _isDark: boolean): any {
@@ -69,6 +87,14 @@ export function MapCanvas({
   onViewModeChange,
   layerData,
   zoomToLayerSignal,
+  interpretations = [],
+  linkedSurveyIds = null,
+  drawActive = false,
+  drawPoints = [],
+  drawColor = "#f97316",
+  onDrawPoint,
+  onDrawDone,
+  onDrawCancel,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const mapRef = useRef<MaplibreMap | null>(null)
@@ -78,6 +104,17 @@ export function MapCanvas({
   const [basemapOffline, setBasemapOffline] = useState(false)
   const mapBasemapRef = useRef<{ current: boolean } | null>(null)
   const baseStyleNonce = useRef(0)
+  const drawActiveRef = useRef(drawActive)
+  const drawPointsRef = useRef(drawPoints)
+  const onDrawPointRef = useRef(onDrawPoint)
+  const onDrawDoneRef = useRef(onDrawDone)
+  const onDrawCancelRef = useRef(onDrawCancel)
+  const lastClickRef = useRef<{ t: number; lng: number; lat: number } | null>(null)
+  drawActiveRef.current = drawActive
+  drawPointsRef.current = drawPoints
+  onDrawPointRef.current = onDrawPoint
+  onDrawDoneRef.current = onDrawDone
+  onDrawCancelRef.current = onDrawCancel
   const { isDark } = useTheme()
   const [baseStyle, setBaseStyle] = useState<BaseMapStyle>(isDark ? "dark" : "light")
 
@@ -99,7 +136,7 @@ export function MapCanvas({
       let geom: any = null
       if (s.footprint_geojson) {
         try {
-          geom = JSON.parse(s.footprint_geojson)
+          geom = typeof s.footprint_geojson === "string" ? JSON.parse(s.footprint_geojson) : s.footprint_geojson
         } catch {}
       }
       if (!geom) continue
@@ -267,6 +304,91 @@ export function MapCanvas({
           },
         })
 
+        // Linked-survey highlight (surveys intersecting the active interpretation)
+        map.addSource("survey-linked", { type: "geojson", data: { type: "FeatureCollection", features: [] } })
+        map.addLayer({
+          id: "survey-linked-fill",
+          type: "fill",
+          source: "survey-linked",
+          layout: { visibility: "none" },
+          paint: { "fill-color": "#f59e0b", "fill-opacity": 0.45 },
+        })
+        map.addLayer({
+          id: "survey-linked-line",
+          type: "line",
+          source: "survey-linked",
+          layout: { visibility: "none" },
+          paint: { "line-color": "#f59e0b", "line-width": 2.5, "line-dasharray": [2, 1] },
+        })
+        map.addLayer({
+          id: "survey-linked-point",
+          type: "circle",
+          source: "survey-linked",
+          layout: { visibility: "none" },
+          paint: {
+            "circle-radius": 5,
+            "circle-color": "#f59e0b",
+            "circle-stroke-color": "#ffffff",
+            "circle-stroke-width": 1.5,
+          },
+        })
+
+        map.addSource("interpretations", { type: "geojson", data: { type: "FeatureCollection", features: [] } })
+        map.addLayer({
+          id: "interpretation-fill",
+          type: "fill",
+          source: "interpretations",
+          layout: { visibility: "visible" },
+          paint: {
+            "fill-color": ["coalesce", ["get", "color"], "#f97316"],
+            "fill-opacity": ["coalesce", ["get", "opacity"], 0.4],
+          },
+        })
+        map.addLayer({
+          id: "interpretation-outline",
+          type: "line",
+          source: "interpretations",
+          layout: { visibility: "visible" },
+          paint: {
+            "line-color": ["coalesce", ["get", "color"], "#f97316"],
+            "line-width": 1.5,
+            "line-opacity": 0.9,
+          },
+        })
+
+        map.addSource("draw-draft", { type: "geojson", data: { type: "FeatureCollection", features: [] } })
+        map.addLayer({
+          id: "draw-draft-fill",
+          type: "fill",
+          source: "draw-draft",
+          paint: {
+            "fill-color": drawColor,
+            "fill-opacity": 0.25,
+          },
+        })
+        map.addLayer({
+          id: "draw-draft-line",
+          type: "line",
+          source: "draw-draft",
+          paint: {
+            "line-color": drawColor,
+            "line-width": 2,
+            "line-dasharray": [2, 1.5],
+            "line-opacity": 0.95,
+          },
+        })
+        map.addLayer({
+          id: "draw-draft-points",
+          type: "circle",
+          source: "draw-draft",
+          paint: {
+            "circle-radius": 4,
+            "circle-color": drawColor,
+            "circle-stroke-color": "#ffffff",
+            "circle-stroke-width": 1,
+          },
+        })
+
         map.setLayoutProperty("survey-fill", "visibility", "visible")
         map.setLayoutProperty("survey-outline", "visibility", "visible")
 
@@ -306,6 +428,7 @@ export function MapCanvas({
     mapBasemapRef.current = basemapOfflineRef
 
     map.on("click", "survey-fill", (e) => {
+      if (drawActiveRef.current) return
       if (!e.features?.[0]) return
       const id = e.features[0].properties?.id
       if (id != null) {
@@ -315,6 +438,7 @@ export function MapCanvas({
     })
 
     map.on("click", "survey-line-2d", (e) => {
+      if (drawActiveRef.current) return
       if (!e.features?.[0]) return
       const id = e.features[0].properties?.id
       if (id != null) {
@@ -323,12 +447,33 @@ export function MapCanvas({
       }
     })
     map.on("click", "survey-point-2d", (e) => {
+      if (drawActiveRef.current) return
       if (!e.features?.[0]) return
       const id = e.features[0].properties?.id
       if (id != null) {
         const rec = surveys.find((s) => s.id === id)
         if (rec) onSelect(rec)
       }
+    })
+
+    // Drawing mode: plain map clicks append vertices; double-click finishes
+    // (the second click of the pair is suppressed to avoid a duplicate vertex).
+    map.on("click", (e) => {
+      if (!drawActiveRef.current || !onDrawPointRef.current) return
+      const now = Date.now()
+      const last = lastClickRef.current
+      const dup =
+        last != null &&
+        now - last.t < 350 &&
+        Math.abs(e.lngLat.lng - last.lng) < 0.01 &&
+        Math.abs(e.lngLat.lat - last.lat) < 0.01
+      lastClickRef.current = { t: now, lng: e.lngLat.lng, lat: e.lngLat.lat }
+      if (dup) return
+      onDrawPointRef.current(e.lngLat.lng, e.lngLat.lat)
+    })
+    map.on("dblclick", () => {
+      if (!drawActiveRef.current || !onDrawDoneRef.current) return
+      if (drawPointsRef.current.length >= 3) onDrawDoneRef.current()
     })
 
     map.on("mouseenter", "survey-fill", () => { map.getCanvas().style.cursor = "pointer" })
@@ -339,10 +484,10 @@ export function MapCanvas({
     map.on("mouseleave", "survey-point-2d", () => { map.getCanvas().style.cursor = "" })
 
     const popupHtml = (p: any) => `<div class="px-3 py-2 text-xs" style="font-family:var(--font-sans);min-width:180px">
-      <div style="font-family:var(--font-mono);font-size:0.625rem;letter-spacing:0.16em;text-transform:uppercase;color:var(--muted-foreground);margin-bottom:4px">${p.si_code || "SIG —"}</div>
-      <div style="font-weight:600;margin-bottom:2px">${p.project_name || ""}</div>
-      <div style="color:var(--seismic)">${p.basin || ""} ${p.project_year ? `· ${p.project_year}` : ""}</div>
-      <div style="color:var(--muted-foreground)">${p.data_dimension || ""} ${p.type_of_processing ? `· ${p.type_of_processing}` : ""}</div>
+      <div style="font-family:var(--font-mono);font-size:0.625rem;letter-spacing:0.16em;text-transform:uppercase;color:var(--muted-foreground);margin-bottom:4px">${escapeHtml(p.si_code) || "SIG —"}</div>
+      <div style="font-weight:600;margin-bottom:2px">${escapeHtml(p.project_name)}</div>
+      <div style="color:var(--seismic)">${escapeHtml(p.basin)} ${p.project_year ? `· ${escapeHtml(p.project_year)}` : ""}</div>
+      <div style="color:var(--muted-foreground)">${escapeHtml(p.data_dimension)} ${p.type_of_processing ? `· ${escapeHtml(p.type_of_processing)}` : ""}</div>
     </div>`
 
     map.on("mousemove", "survey-fill", (e) => {
@@ -500,6 +645,117 @@ export function MapCanvas({
     map.setLayoutProperty("survey-point-2d", "visibility", "visible")
   }, [viewMode, mapReady])
 
+  // ── Interpretation polygons ────────────────────────────────────
+  useEffect(() => {
+    if (!mapRef.current || !mapReady) return
+    const map = mapRef.current
+    const src = map.getSource("interpretations") as GeoJSONSource | undefined
+    if (!src) return
+    const features = interpretations
+      .filter((r) => r.visible && r.geometry_geojson)
+      .map((r) => ({
+        type: "Feature" as const,
+        id: r.id,
+        properties: {
+          id: r.id,
+          name: r.name ?? r.si_code ?? `Interpretation #${r.id}`,
+          color: r.color,
+          opacity: r.opacity,
+        },
+        geometry: r.geometry_geojson as GeoJSON.Geometry,
+      }))
+    src.setData({ type: "FeatureCollection", features })
+  }, [interpretations, mapReady])
+
+  // ── Linked-survey highlight ────────────────────────────────────
+  useEffect(() => {
+    if (!mapRef.current || !mapReady) return
+    const map = mapRef.current
+    const src = map.getSource("survey-linked") as GeoJSONSource | undefined
+    const active = linkedSurveyIds != null && linkedSurveyIds.length > 0
+    for (const l of ["survey-linked-fill", "survey-linked-line", "survey-linked-point"]) {
+      map.setLayoutProperty(l, "visibility", active ? "visible" : "none")
+    }
+    if (!src) return
+    if (!active) {
+      src.setData({ type: "FeatureCollection", features: [] })
+      return
+    }
+    const ids = new Set(linkedSurveyIds)
+    const features: any[] = []
+    for (const s of surveys) {
+      if (!ids.has(s.id)) continue
+      let geom: any = null
+      if (s.footprint_geojson) {
+        try {
+          geom = typeof s.footprint_geojson === "string" ? JSON.parse(s.footprint_geojson) : s.footprint_geojson
+        } catch {}
+      }
+      if (!geom) continue
+      features.push({ type: "Feature", id: s.id, properties: { id: s.id }, geometry: geom })
+    }
+    src.setData({ type: "FeatureCollection", features })
+  }, [linkedSurveyIds, surveys, mapReady])
+
+  useEffect(() => {
+    if (!mapRef.current || !mapReady) return
+    const map = mapRef.current
+    const src = map.getSource("draw-draft") as GeoJSONSource | undefined
+    if (!src) return
+    const features: GeoJSON.Feature[] = []
+    if (drawActive && drawPoints.length > 0) {
+      if (drawPoints.length >= 2) {
+        features.push({
+          type: "Feature",
+          properties: {},
+          geometry: { type: "LineString", coordinates: drawPoints },
+        })
+        if (drawPoints.length >= 3) {
+          features.push({
+            type: "Feature",
+            properties: {},
+            geometry: { type: "Polygon", coordinates: [[...drawPoints, drawPoints[0]]] },
+          })
+        }
+      }
+      features.push({
+        type: "Feature",
+        properties: {},
+        geometry: { type: "MultiPoint", coordinates: drawPoints },
+      })
+    }
+    src.setData({ type: "FeatureCollection", features })
+  }, [drawActive, drawPoints, mapReady])
+
+  useEffect(() => {
+    if (!mapRef.current || !mapReady) return
+    const map = mapRef.current
+    const visible = drawActive ? "visible" : "none"
+    for (const l of ["draw-draft-fill", "draw-draft-line", "draw-draft-points"]) {
+      map.setLayoutProperty(l, "visibility", visible)
+    }
+    if (drawActive) {
+      try { map.doubleClickZoom.disable() } catch {}
+      map.getCanvas().style.cursor = "crosshair"
+      const onKey = (e: KeyboardEvent) => {
+        const t = e.target as HTMLElement | null
+        const tag = t?.tagName
+        if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || t?.isContentEditable) return
+        if (e.key === "Escape") onDrawCancelRef.current?.()
+        if (e.key === "Enter") {
+          if (drawPointsRef.current.length >= 3) onDrawDoneRef.current?.()
+        }
+      }
+      window.addEventListener("keydown", onKey)
+      return () => {
+        window.removeEventListener("keydown", onKey)
+        map.getCanvas().style.cursor = ""
+      }
+    }
+    try { map.doubleClickZoom.enable() } catch {}
+    map.getCanvas().style.cursor = ""
+  }, [drawActive, mapReady])
+
   // ── Uploaded layers rendering ──────────────────────────────────
   useEffect(() => {
     if (!mapRef.current || !mapReady) return
@@ -590,7 +846,7 @@ export function MapCanvas({
         const rows = Object.entries(p)
           .filter(([k]) => !k.startsWith("_"))
           .slice(0, 15)
-          .map(([k, v]) => `<tr><td class="pr-2 font-semibold">${k}</td><td>${v ?? "—"}</td></tr>`)
+          .map(([k, v]) => `<tr><td class="pr-2 font-semibold">${escapeHtml(k)}</td><td>${escapeHtml(v)}</td></tr>`)
           .join("")
         popupRef.current = new Popup({ closeButton: false, closeOnClick: false, offset: 10 })
           .setLngLat(e.lngLat)

@@ -1,6 +1,6 @@
 import { Router } from "express"
 import { z } from "zod"
-import { query } from "../db.js"
+import { query, withTransaction } from "../db.js"
 import { jsPDF } from "jspdf"
 import { autoTable } from "jspdf-autotable"
 import { reprojectRecord } from "../lib/reproject.js"
@@ -52,19 +52,7 @@ surveysRouter.get("/", async (_req, res, next) => {
         ST_AsGeoJSON(
           COALESCE(
             r.footprint,
-            CASE
-              WHEN r.bbox_min_lon IS NOT NULL AND r.bbox_min_lat IS NOT NULL AND r.bbox_max_lon IS NOT NULL AND r.bbox_max_lat IS NOT NULL
-              THEN ST_MakeEnvelope(
-                LEAST(r.bbox_min_lon, r.bbox_max_lon),
-                LEAST(r.bbox_min_lat, r.bbox_max_lat),
-                GREATEST(r.bbox_min_lon, r.bbox_max_lon),
-                GREATEST(r.bbox_min_lat, r.bbox_max_lat),
-                4326
-              )
-              WHEN r.centroid_lon IS NOT NULL AND r.centroid_lat IS NOT NULL
-              THEN ST_MakeEnvelope(r.centroid_lon - 0.05, r.centroid_lat - 0.05, r.centroid_lon + 0.05, r.centroid_lat + 0.05, 4326)
-              ELSE NULL
-            END
+            r.centroid_geom
           )
         ) AS footprint_geojson,
         ST_AsGeoJSON(r.centroid_geom) AS centroid_geojson,
@@ -83,6 +71,8 @@ surveysRouter.get("/", async (_req, res, next) => {
     res.json(
       rows.map((row: any) => ({
         ...row,
+        footprint_geojson: row.footprint_geojson ? JSON.parse(row.footprint_geojson) : null,
+        centroid_geojson: row.centroid_geojson ? JSON.parse(row.centroid_geojson) : null,
         geometry_notes: parsePgArray(row.geometry_notes),
         validation_issues: parsePgArray(row.validation_issues),
         projects: typeof row.projects === "string" ? JSON.parse(row.projects) : row.projects,
@@ -535,80 +525,121 @@ surveysRouter.put("/:id", async (req, res, next) => {
 
 surveysRouter.post("/reprocess", async (_req, res, next) => {
   try {
-    const { rows } = await query(`
-      SELECT r.id, r.si_code, r.projection, r.utm_zone, r.spheroid,
-        r.g1_x, r.g1_y, r.g2_x, r.g2_y, r.g3_x, r.g3_y, r.g4_x, r.g4_y,
-        r.g1_il, r.g1_xl, r.g2_il, r.g2_xl, r.g3_il, r.g3_xl, r.g4_il, r.g4_xl,
-        p.basin
-      FROM processing_records r
-      JOIN projects p ON p.project_id = r.project_id
-      WHERE r.g1_x IS NOT NULL OR r.g2_x IS NOT NULL
-    `)
-    let fixed = 0
-    let errors = 0
-    for (const rec of rows as any[]) {
-      try {
-        const rr = reprojectRecord({
-          id: Number(rec.id),
-          si_code: rec.si_code ?? null,
-          projection: rec.projection ?? null,
-          utm_zone: rec.utm_zone ?? null,
-          spheroid: rec.spheroid ?? null,
-          basin: rec.basin ?? null,
-          g: [1, 2, 3, 4].map((i) => ({
-            x: rec[`g${i}_x`] != null ? Number(rec[`g${i}_x`]) : null,
-            y: rec[`g${i}_y`] != null ? Number(rec[`g${i}_y`]) : null,
-            il: rec[`g${i}_il`] != null ? Number(rec[`g${i}_il`]) : null,
-            xl: rec[`g${i}_xl`] != null ? Number(rec[`g${i}_xl`]) : null,
-            corner: i,
-          })),
-        })
-        if (!rr.isMapped) {
-          console.warn(`[reprocess] id=${rec.id} could not be mapped, skipping`)
+    const result = await withTransaction(async (client) => {
+      const { rows } = await client.query(`
+        SELECT r.id, r.si_code, r.projection, r.utm_zone, r.spheroid,
+          r.g1_x, r.g1_y, r.g2_x, r.g2_y, r.g3_x, r.g3_y, r.g4_x, r.g4_y,
+          r.g1_il, r.g1_xl, r.g2_il, r.g2_xl, r.g3_il, r.g3_xl, r.g4_il, r.g4_xl,
+          p.basin
+        FROM processing_records r
+        JOIN projects p ON p.project_id = r.project_id
+        WHERE r.g1_x IS NOT NULL OR r.g2_x IS NOT NULL
+      `)
+      let fixed = 0
+      let errors = 0
+      for (const rec of rows as any[]) {
+        try {
+          const rr = reprojectRecord({
+            id: Number(rec.id),
+            si_code: rec.si_code ?? null,
+            projection: rec.projection ?? null,
+            utm_zone: rec.utm_zone ?? null,
+            spheroid: rec.spheroid ?? null,
+            basin: rec.basin ?? null,
+            g: [1, 2, 3, 4].map((i) => ({
+              x: rec[`g${i}_x`] != null ? Number(rec[`g${i}_x`]) : null,
+              y: rec[`g${i}_y`] != null ? Number(rec[`g${i}_y`]) : null,
+              il: rec[`g${i}_il`] != null ? Number(rec[`g${i}_il`]) : null,
+              xl: rec[`g${i}_xl`] != null ? Number(rec[`g${i}_xl`]) : null,
+              corner: i,
+            })),
+          })
+          if (!rr.isMapped) {
+            console.warn(`[reprocess] id=${rec.id} could not be mapped, skipping`)
+            errors++
+            continue
+          }
+          await client.query(`
+            UPDATE processing_records SET
+              utm_zone = $1,
+              corners = $2,
+              bbox_min_lon = $3, bbox_min_lat = $4, bbox_max_lon = $5, bbox_max_lat = $6,
+              centroid_lon = $7, centroid_lat = $8,
+              is_mapped = $9,
+              geometry_status = $10,
+              geometry_notes = $11,
+              source_crs = $12,
+              source_epsg = $13,
+              conversion_status = $14,
+              validation_issues = $15,
+              flagged_for_review = $16,
+              footprint = ST_GeomFromText($17, 4326),
+              centroid_geom = ST_GeomFromText($18, 4326)
+            WHERE id = $19
+          `, [
+            rr.crs || `UTM zone ${rec.utm_zone}`,
+            JSON.stringify(rr.corners),
+            rr.bbox?.minLon ?? null, rr.bbox?.minLat ?? null, rr.bbox?.maxLon ?? null, rr.bbox?.maxLat ?? null,
+            rr.centroidLon, rr.centroidLat,
+            true,
+            "SURVEYED",
+            rr.geometryNotes,
+            rr.sourceCrs,
+            rr.sourceEpsg,
+            rr.conversionStatus,
+            rr.validationIssues,
+            rr.flagged,
+            rr.footprintWkt || null,
+            rr.centroidWkt,
+            rec.id,
+          ])
+          fixed++
+        } catch (recErr) {
+          console.error(`[reprocess] error processing id=${rec.id}:`, recErr)
           errors++
-          continue
         }
-        await query(`
-          UPDATE processing_records SET
-            utm_zone = $1,
-            corners = $2,
-            bbox_min_lon = $3, bbox_min_lat = $4, bbox_max_lon = $5, bbox_max_lat = $6,
-            centroid_lon = $7, centroid_lat = $8,
-            is_mapped = $9,
-            geometry_status = $10,
-            geometry_notes = $11,
-            source_crs = $12,
-            source_epsg = $13,
-            conversion_status = $14,
-            validation_issues = $15,
-            flagged_for_review = $16,
-            footprint = ST_GeomFromText($17, 4326),
-            centroid_geom = ST_GeomFromText($18, 4326)
-          WHERE id = $19
-        `, [
-          rr.crs || `UTM zone ${rec.utm_zone}`,
-          JSON.stringify(rr.corners),
-          rr.bbox?.minLon ?? null, rr.bbox?.minLat ?? null, rr.bbox?.maxLon ?? null, rr.bbox?.maxLat ?? null,
-          rr.centroidLon, rr.centroidLat,
-          true,
-          "SURVEYED",
-          rr.geometryNotes,
-          rr.sourceCrs,
-          rr.sourceEpsg,
-          rr.conversionStatus,
-          rr.validationIssues,
-          rr.flagged,
-          rr.footprintWkt || null,
-          rr.centroidWkt,
-          rec.id,
-        ])
-        fixed++
-      } catch (recErr) {
-        console.error(`[reprocess] error processing id=${rec.id}:`, recErr)
-        errors++
       }
+      return { reprocessed: fixed, errors }
+    })
+    res.json(result)
+  } catch (err) {
+    next(err)
+  }
+})
+
+surveysRouter.get("/:id/interpretations", async (req, res, next) => {
+  try {
+    const id = z.coerce.number().int().positive().parse(req.params.id)
+    const { rows: recRows } = await query(
+      "SELECT footprint FROM processing_records WHERE id = $1",
+      [id],
+    )
+    if (!recRows.length) {
+      res.status(404).json({ error: "Survey not found" })
+      return
     }
-    res.json({ reprocessed: fixed, errors })
+    const footprint = recRows[0].footprint
+    if (!footprint) {
+      res.json([])
+      return
+    }
+    const { rows } = await query(
+      `SELECT id, si_code, name, description, color, opacity, visible,
+              processing_type, project_year,
+              ST_AsGeoJSON(geometry) AS geometry_geojson,
+              properties, created_at, updated_at
+       FROM interpretation_polygons
+       WHERE ST_Intersects(geometry, $1)
+       ORDER BY created_at DESC`,
+      [footprint],
+    )
+    res.json(
+      rows.map((r: any) => ({
+        ...r,
+        geometry_geojson: r.geometry_geojson ? JSON.parse(r.geometry_geojson) : null,
+        properties: typeof r.properties === "string" ? JSON.parse(r.properties) : r.properties,
+      })),
+    )
   } catch (err) {
     next(err)
   }

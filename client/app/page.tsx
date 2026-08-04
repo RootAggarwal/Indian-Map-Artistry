@@ -1,8 +1,8 @@
 "use client"
 
 import { useEffect, useMemo, useRef, useState } from "react"
-import { useQuery, useQueries, useQueryClient } from "@tanstack/react-query"
-import { Activity, Info, RotateCcw, X, Palette, PanelLeftClose, PanelRightClose, PanelBottomClose } from "lucide-react"
+import { useQuery, useQueryClient } from "@tanstack/react-query"
+import { Activity, RotateCcw, X, Palette, PanelLeftClose, PanelRightClose, PanelBottomClose, ZoomIn, ZoomOut } from "lucide-react"
 import {
   counts,
   fetchReports,
@@ -14,12 +14,14 @@ import {
   saveSurveys,
   updateSurvey,
   reprocessSurveys,
+  downloadPdf,
   type SurveyDraft,
   type SurveyRecord,
   type SurveyUpdate,
 } from "@/lib/seismic"
 import { FilterRail, type FacetKey } from "@/components/seismic/FilterRail"
 import { MapCanvas } from "@/components/seismic/MapCanvas"
+import { MapErrorBoundary } from "@/components/seismic/MapErrorBoundary"
 import { RibbonBar } from "@/components/seismic/RibbonBar"
 import { EntityPanel } from "@/components/seismic/EntityPanel"
 import { BottomBar } from "@/components/seismic/BottomBar"
@@ -29,7 +31,12 @@ import LayerPanel from "@/components/seismic/LayerPanel"
 import ShapefileUploader from "@/components/seismic/ShapefileUploader"
 import MapDropOverlay from "@/components/seismic/MapDropOverlay"
 import { useTheme, type ThemeId } from "@/contexts/theme"
-import { fetchLayers, fetchFeatures, updateLayer, deleteLayer, reorderLayers, resetPalette } from "@/lib/layers"
+import { useFontSize } from "@/contexts/font-size"
+import { ResizablePanelGroupPersist, ResizablePanel, ResizableHandle } from "@/components/ui/resizable"
+import { fetchInterpretations, createInterpretations, updateInterpretation, deleteInterpretation, fetchSurveysForInterpretation, fetchInterpretationsForRecord } from "@/lib/interpretations"
+import type { InterpretationRecord } from "@/lib/interpretations"
+import InterpretationPanel from "@/components/seismic/InterpretationPanel"
+import { fetchLayers, fetchFeatures, fetchBulkFeatures, updateLayer, deleteLayer, reorderLayers, resetPalette } from "@/lib/layers"
 import type { LayerRecord, LayerStyle } from "@/lib/layers"
 import { useShapefileImport } from "@/lib/useShapefileImport"
 import type { MapTool, ViewMode } from "@/components/seismic/types"
@@ -62,6 +69,7 @@ function facetValue(rec: SurveyRecord, key: FacetKey) {
 export default function Dashboard() {
   const queryClient = useQueryClient()
   const { theme, setTheme, isDark } = useTheme()
+  const { fontSize, setFontSize, increase: fontSizeUp, decrease: fontSizeDown } = useFontSize()
   const surveys = useQuery({ queryKey: ["surveys"], queryFn: fetchSurveys })
   const reports = useQuery({ queryKey: ["reports"], queryFn: fetchReports })
 
@@ -88,6 +96,71 @@ export default function Dashboard() {
 
   const layersQuery = useQuery({ queryKey: ["layers"], queryFn: fetchLayers })
   const layers = layersQuery.data ?? []
+  const interpretationsQuery = useQuery({ queryKey: ["interpretations"], queryFn: fetchInterpretations })
+  const interpretations = interpretationsQuery.data ?? []
+
+  const recordInterpretationsQuery = useQuery({
+    queryKey: ["interpretations", "by-record", activeId],
+    queryFn: () => fetchInterpretationsForRecord(activeId!),
+    enabled: activeId != null,
+  })
+  const recordInterpretations = recordInterpretationsQuery.data ?? []
+
+  const [drawActive, setDrawActive] = useState(false)
+  const [drawPoints, setDrawPoints] = useState<[number, number][]>([])
+  const [drawColor, setDrawColor] = useState("#f97316")
+
+  const [linkedSurveyIds, setLinkedSurveyIds] = useState<number[] | null>(null)
+  const [linkedInfo, setLinkedInfo] = useState<{ id: number; count: number } | null>(null)
+  const [linkingId, setLinkingId] = useState<number | null>(null)
+
+  async function handleLinkSurveys(rec: InterpretationRecord) {
+    setLinkingId(rec.id)
+    try {
+      const res = await fetchSurveysForInterpretation(rec.id)
+      setLinkedSurveyIds(res.surveys.map((s) => s.id))
+      setLinkedInfo({ id: rec.id, count: res.surveys.length })
+    } catch (err) {
+      console.error("[interpretations] link failed:", err)
+      setLinkedSurveyIds(null)
+      setLinkedInfo(null)
+    }
+    setLinkingId(null)
+  }
+
+  function handleUnlinkSurveys() {
+    setLinkedSurveyIds(null)
+    setLinkedInfo(null)
+    setLinkingId(null)
+  }
+
+  function handleDrawPoint(lng: number, lat: number) {
+    setDrawPoints((prev) => (prev.length >= 64 ? prev : [...prev, [lng, lat]]))
+  }
+
+  async function handleFinishDraw(name: string, color: string) {
+    if (drawPoints.length < 3) return
+    const coords: [number, number][] = [...drawPoints, drawPoints[0]]
+    try {
+      await createInterpretations([
+        {
+          name: name || null,
+          color,
+          geometry: { type: "Polygon", coordinates: [coords] },
+        },
+      ])
+      await interpretationsQuery.refetch()
+    } catch (err) {
+      console.error("[interpretations] create failed:", err)
+    }
+    setDrawPoints([])
+    setDrawActive(false)
+  }
+
+  function handleCancelDraw() {
+    setDrawPoints([])
+    setDrawActive(false)
+  }
 
   const mapDropDepth = useRef(0)
   const [mapDragging, setMapDragging] = useState(false)
@@ -127,23 +200,27 @@ export default function Dashboard() {
     }
   }
 
-  const layerFeatureQueries = useQueries({
-    queries: layers
-      .filter((l) => (l.feature_count ?? 0) > 0)
-      .map((l) => ({
-        queryKey: ["layer-features", l.id],
-        queryFn: () => fetchFeatures(l.id),
-        staleTime: 60_000,
-      })),
+  const layerIdsWithFeatures = useMemo(
+    () => layers.filter((l) => (l.feature_count ?? 0) > 0).map((l) => l.id),
+    [layers],
+  )
+
+  const bulkFeaturesQuery = useQuery({
+    queryKey: ["layer-features-bulk", layerIdsWithFeatures],
+    queryFn: () => fetchBulkFeatures(layerIdsWithFeatures),
+    enabled: layerIdsWithFeatures.length > 0,
+    staleTime: 60_000,
   })
 
   const layerData = useMemo(() => {
-    const withFeatures = layers.filter((l) => (l.feature_count ?? 0) > 0)
-    return withFeatures.map((l, i) => ({
-      layer: l,
-      features: layerFeatureQueries[i]?.data ?? { type: "FeatureCollection", features: [] },
-    }))
-  }, [layers, layerFeatureQueries])
+    const bulk = bulkFeaturesQuery.data ?? {}
+    return layers
+      .filter((l) => (l.feature_count ?? 0) > 0)
+      .map((l) => ({
+        layer: l,
+        features: bulk[String(l.id)] ?? { type: "FeatureCollection", features: [] },
+      }))
+  }, [layers, bulkFeaturesQuery.data])
 
   async function handleToggleVisibility(id: number) {
     const lr = layers.find((l) => l.id === id)
@@ -269,23 +346,7 @@ export default function Dashboard() {
   async function printReport(rec: SurveyRecord | null) {
     if (!rec) return
     try {
-      const base = (process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000/api").replace(/\/api\/?$/, "")
-      const resp = await fetch(`${base}/api/surveys/${rec.id}/pdf`)
-      if (!resp.ok) {
-        const err = await resp.json().catch(() => ({}))
-        throw new Error((err as any).error || `HTTP ${resp.status}`)
-      }
-      const blob = await resp.blob()
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement("a")
-      a.href = url
-      const disposition = resp.headers.get("Content-Disposition") || ""
-      const m = disposition.match(/filename="?(.+?)"?$/)
-      a.download = m ? m[1] : `seismic-dossier-${rec.project_id}.pdf`
-      document.body.appendChild(a)
-      a.click()
-      a.remove()
-      URL.revokeObjectURL(url)
+      await downloadPdf(rec)
       void logAudit("REPORT_EXPORTED", {
         project_id: rec.project_id,
         si_code: rec.si_code,
@@ -398,6 +459,30 @@ export default function Dashboard() {
                     </div>
                   ))}
                   <div className="border-t border-border mt-1 pt-1 pb-1">
+                    <p className="rail-label px-3 pt-2 pb-1">Font Size</p>
+                    <div className="flex items-center gap-1 px-3 py-1">
+                      <button
+                        onClick={() => fontSizeDown()}
+                        disabled={fontSize === "normal"}
+                        className="grid h-7 w-7 place-items-center border border-border text-muted-foreground transition-colors hover:border-ochre hover:text-ochre disabled:opacity-30 disabled:hover:border-border disabled:hover:text-muted-foreground"
+                        title="Decrease font size"
+                      >
+                        <ZoomOut className="h-3.5 w-3.5" />
+                      </button>
+                      <span className="flex-1 text-center text-[0.72rem] text-foreground">
+                        {fontSize === "normal" ? "Default" : fontSize === "large" ? "Large" : "X-Large"}
+                      </span>
+                      <button
+                        onClick={() => fontSizeUp()}
+                        disabled={fontSize === "xlarge"}
+                        className="grid h-7 w-7 place-items-center border border-border text-muted-foreground transition-colors hover:border-ochre hover:text-ochre disabled:opacity-30 disabled:hover:border-border disabled:hover:text-muted-foreground"
+                        title="Increase font size"
+                      >
+                        <ZoomIn className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                  <div className="border-t border-border mt-1 pt-1 pb-1">
                     <button
                       onClick={async () => {
                         await reprocessSurveys()
@@ -417,24 +502,35 @@ export default function Dashboard() {
         </div>
       </header>
 
-      <div className="flex min-h-0 flex-1">
+      <ResizablePanelGroupPersist id="geopic:main" orientation="horizontal" className="min-h-0 flex-1">
         {sidebarOpen && (
-          <aside className="hidden w-60 shrink-0 border-r border-border bg-surface lg:block">
-            <FilterRail
-              facets={facets}
-              selected={selected}
-              toggle={toggleFacet}
-              clear={() => {
-                setSelected(EMPTY)
-                void logAudit("FILTER_CLEARED")
-              }}
-              total={all.length}
-              shown={filtered.length}
-            />
-          </aside>
+          <>
+            <ResizablePanel
+              id="sidebar"
+              className="hidden overflow-hidden lg:flex"
+              defaultSize={240}
+              minSize={180}
+              maxSize={420}
+            >
+              <aside className="flex h-full w-full flex-col border-r border-border bg-surface">
+                <FilterRail
+                  facets={facets}
+                  selected={selected}
+                  toggle={toggleFacet}
+                  clear={() => {
+                    setSelected(EMPTY)
+                    void logAudit("FILTER_CLEARED")
+                  }}
+                  total={all.length}
+                  shown={filtered.length}
+                />
+              </aside>
+            </ResizablePanel>
+            <ResizableHandle id="sidebar-handle" className="hidden lg:flex" />
+          </>
         )}
 
-        <section className="flex min-w-0 flex-1 flex-col">
+        <ResizablePanel id="main-section" className="flex min-h-0 min-w-0 flex-col">
           <RibbonBar
             tool={tool}
             setTool={(t) => {
@@ -466,92 +562,163 @@ export default function Dashboard() {
             onToggleDetails={() => setDetailsOpen((o) => !o)}
             onToggleBottom={() => setBottomOpen((o) => !o)}
           />
-          <div className="flex min-h-0 flex-1">
-            <div
-              className="relative min-w-0 flex-1 flex flex-col"
-              onDragEnter={handleMapDragEnter}
-              onDragOver={handleMapDragOver}
-              onDragLeave={handleMapDragLeave}
-              onDrop={handleMapDrop}
-            >
-              <MapCanvas
-                surveys={filtered}
-                selectedId={activeId}
-                onSelect={selectRec}
-                zoomSignal={zoomSignal}
-                resetSignal={resetSignal}
-                yearFilterActive={timelineYear}
-                viewMode={viewMode}
-                onViewModeChange={setViewMode}
-                layerData={layerData}
-                zoomToLayerSignal={zoomToLayerSig}
-              />
-              <MapDropOverlay
-                dragging={mapDragging}
-                importing={importingShapefile}
-                status={importStatus}
-                onDismissStatus={dismissStatus}
-              />
-            </div>
-            {layerPanelOpen && (
-              <aside className="hidden w-60 shrink-0 border-l border-border bg-surface lg:flex lg:flex-col">
-                <div className="flex items-center justify-between border-b border-border px-3 py-2">
-                  <h3 className="rail-label text-xs font-semibold uppercase tracking-wider">Layers</h3>
-                  <span className="text-[10px] text-muted-foreground">{layers.length} layer{layers.length !== 1 ? "s" : ""}</span>
-                </div>
-                <ShapefileUploader onLayerCreated={handleLayerCreated} />
-                <div className="flex-1 overflow-y-auto">
-                  <LayerPanel
-                    layers={[...layers].sort((a, b) => a.display_order - b.display_order)}
-                    onToggleVisibility={handleToggleVisibility}
-                    onRemove={handleRemoveLayer}
-                    onRename={handleRenameLayer}
-                    onZoomTo={handleZoomToLayer}
-                    onReorder={handleReorderLayer}
-                    onStyleChange={async (id, style) => {
-                      await updateLayer(id, { style })
-                      await layersQuery.refetch()
+
+          <ResizablePanelGroupPersist id="geopic:content" orientation="vertical" className="min-h-0 flex-1">
+            <ResizablePanel id="content-top" className="flex min-h-0 min-w-0 flex-col">
+              <ResizablePanelGroupPersist id="geopic:maprow" orientation="horizontal" className="min-h-0 flex-1">
+                <ResizablePanel id="map" className="flex min-h-0 min-w-0">
+                  <div
+                    className="relative min-w-0 flex-1 flex flex-col"
+                    onDragEnter={handleMapDragEnter}
+                    onDragOver={handleMapDragOver}
+                    onDragLeave={handleMapDragLeave}
+                    onDrop={handleMapDrop}
+                  >
+                    <MapErrorBoundary>
+                      <MapCanvas
+                        surveys={filtered}
+                        selectedId={activeId}
+                        onSelect={selectRec}
+                        zoomSignal={zoomSignal}
+                        resetSignal={resetSignal}
+                        yearFilterActive={timelineYear}
+                        viewMode={viewMode}
+                        onViewModeChange={setViewMode}
+                        layerData={layerData}
+                        zoomToLayerSignal={zoomToLayerSig}
+                        interpretations={interpretations}
+                        linkedSurveyIds={linkedSurveyIds}
+                        drawActive={drawActive}
+                        drawPoints={drawPoints}
+                        drawColor={drawColor}
+                        onDrawPoint={handleDrawPoint}
+                        onDrawDone={() => void handleFinishDraw("", drawColor)}
+                        onDrawCancel={handleCancelDraw}
+                      />
+                    </MapErrorBoundary>
+                    <MapDropOverlay
+                      dragging={mapDragging}
+                      importing={importingShapefile}
+                      status={importStatus}
+                      onDismissStatus={dismissStatus}
+                    />
+                  </div>
+                </ResizablePanel>
+                {layerPanelOpen && (
+                  <>
+                    <ResizableHandle id="layers-handle" className="hidden lg:flex" />
+                    <ResizablePanel
+                      id="layers"
+                      className="hidden overflow-hidden lg:flex"
+                      defaultSize={240}
+                      minSize={180}
+                      maxSize={420}
+                    >
+                      <aside className="flex h-full w-full flex-col border-l border-border bg-surface">
+                        <div className="flex items-center justify-between border-b border-border px-3 py-2">
+                          <h3 className="rail-label text-xs font-semibold uppercase tracking-wider">Layers</h3>
+                          <span className="text-[10px] text-muted-foreground">{layers.length} layer{layers.length !== 1 ? "s" : ""}</span>
+                        </div>
+                        <ShapefileUploader onLayerCreated={handleLayerCreated} />
+                        <div className="flex-1 overflow-y-auto">
+                          <LayerPanel
+                            layers={[...layers].sort((a, b) => a.display_order - b.display_order)}
+                            onToggleVisibility={handleToggleVisibility}
+                            onRemove={handleRemoveLayer}
+                            onRename={handleRenameLayer}
+                            onZoomTo={handleZoomToLayer}
+                            onReorder={handleReorderLayer}
+                            onStyleChange={async (id, style) => {
+                              await updateLayer(id, { style })
+                              await layersQuery.refetch()
+                            }}
+                          />
+                        </div>
+                        <InterpretationPanel
+                          interpretations={interpretations}
+                          drawActive={drawActive}
+                          drawPoints={drawPoints.length}
+                          color={drawColor}
+                          onColorChange={setDrawColor}
+                          onStartDraw={() => {
+                            setDrawPoints([])
+                            setDrawActive(true)
+                          }}
+                          onCancelDraw={handleCancelDraw}
+                          onFinishDraw={(name, color) => void handleFinishDraw(name, color)}
+                          onToggleVisible={async (rec, visible) => {
+                            await updateInterpretation(rec.id, { visible })
+                            await interpretationsQuery.refetch()
+                          }}
+                          onDelete={async (rec) => {
+                            await deleteInterpretation(rec.id)
+                            await interpretationsQuery.refetch()
+                          }}
+                          onRename={async (rec, name) => {
+                            await updateInterpretation(rec.id, { name })
+                            await interpretationsQuery.refetch()
+                          }}
+                          linkedInfo={linkedInfo}
+                          linkingId={linkingId}
+                          onLinkSurveys={(rec) => void handleLinkSurveys(rec)}
+                          onUnlinkSurveys={handleUnlinkSurveys}
+                        />
+                      </aside>
+                    </ResizablePanel>
+                  </>
+                )}
+                {detailsOpen && (
+                  <>
+                    <ResizableHandle id="details-handle" className="hidden lg:flex" />
+                    <ResizablePanel
+                      id="details"
+                      className="hidden overflow-hidden lg:flex"
+                      defaultSize={288}
+                      minSize={224}
+                      maxSize={440}
+                    >
+                      <aside className="flex h-full w-full flex-col border-l border-border bg-surface">
+                        <EntityPanel
+                          rec={activeRec}
+                          reports={reports.data ?? []}
+                          interpretations={recordInterpretations}
+                          onPrint={() => void printReport(activeRec)}
+                          onOpenDetails={() => {
+                            setDialogRec(activeRec)
+                            void logAudit("DETAILS_OPENED", { project_id: activeRec?.project_id ?? null })
+                          }}
+                        />
+                      </aside>
+                    </ResizablePanel>
+                  </>
+                )}
+              </ResizablePanelGroupPersist>
+            </ResizablePanel>
+            {bottomOpen && <ResizableHandle id="bottom-handle" className="hidden lg:flex" />}
+            {bottomOpen && (
+              <ResizablePanel
+                id="bottom"
+                className="hidden overflow-hidden lg:flex"
+                defaultSize={200}
+                minSize={120}
+                maxSize={500}
+              >
+                <div className="flex h-full w-full flex-col border-t border-border">
+                  <BottomBar
+                    rows={filtered}
+                    selectedId={activeId}
+                    onSelect={selectRec}
+                    onMore={(rec) => {
+                      selectRec(rec)
+                      setDialogRec(rec)
                     }}
                   />
                 </div>
-              </aside>
+              </ResizablePanel>
             )}
-            {detailsOpen && (
-              <aside className="hidden w-72 shrink-0 border-l border-border bg-surface lg:block">
-                <EntityPanel
-                  rec={activeRec}
-                  reports={reports.data ?? []}
-                  onPrint={() => void printReport(activeRec)}
-                  onOpenDetails={() => {
-                    setDialogRec(activeRec)
-                    void logAudit("DETAILS_OPENED", { project_id: activeRec?.project_id ?? null })
-                  }}
-                />
-              </aside>
-            )}
-          </div>
-          {adjusted > 0 && (
-            <p className="flex items-start gap-2 border-t border-border bg-rust/10 px-3 py-2 text-[0.7rem] leading-snug text-foreground/85">
-              <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-rust" />
-              {adjusted} footprint{adjusted > 1 ? "s" : ""} in view carry a cartographic note — squared to an
-              axis-aligned box and/or clipped to the Indian boundary.
-            </p>
-          )}
-          {bottomOpen && (
-            <div className="h-48 shrink-0 border-t border-border lg:h-44">
-              <BottomBar
-                rows={filtered}
-                selectedId={activeId}
-                onSelect={selectRec}
-                onMore={(rec) => {
-                  selectRec(rec)
-                  setDialogRec(rec)
-                }}
-              />
-            </div>
-          )}
-        </section>
-      </div>
+          </ResizablePanelGroupPersist>
+        </ResizablePanel>
+      </ResizablePanelGroupPersist>
 
       {lastImport && (
         <div className="flex items-center gap-3 border-t border-seismic/40 bg-seismic/10 px-4 py-2">

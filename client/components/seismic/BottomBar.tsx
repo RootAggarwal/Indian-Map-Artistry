@@ -34,7 +34,7 @@ export function BottomBar({ rows, selectedId, onSelect, onMore }: Props) {
               {["Year", "Project name", "Details", "Summary", ""].map((h) => (
                 <th
                   key={h}
-                  className="rail-label border-b border-border px-3 py-2 text-left font-normal"
+                  className="rail-label border-b border-border px-3 py-2.5 text-left font-normal"
                 >
                   {h}
                 </th>
@@ -49,26 +49,26 @@ export function BottomBar({ rows, selectedId, onSelect, onMore }: Props) {
                   key={rec.id}
                   onClick={() => onSelect(rec)}
                   className={`cursor-pointer border-b border-border/60 transition-colors ${
-                    active ? "bg-ochre/12" : "hover:bg-surface-2/60"
+                    active ? "bg-ochre/15" : "hover:bg-surface-2/60"
                   }`}
                 >
-                  <td className="data-cell whitespace-nowrap px-3 py-2 text-ochre">
+                  <td className="data-cell whitespace-nowrap px-3 py-2.5 font-medium text-ochre">
                     {rec.project_year ?? "—"}
                   </td>
-                  <td className="max-w-[22rem] px-3 py-2">
-                    <span className="block truncate text-[0.78rem] text-foreground">
+                  <td className="max-w-[22rem] px-3 py-2.5">
+                    <span className="block truncate text-foreground font-medium">
                       {rec.projects?.project_name}
                     </span>
                   </td>
-                  <td className="data-cell whitespace-nowrap px-3 py-2 text-seismic">
+                  <td className="data-cell whitespace-nowrap px-3 py-2.5 font-medium text-seismic">
                     {rec.si_code ?? "—"}
                   </td>
-                  <td className="max-w-[24rem] px-3 py-2">
-                    <span className="block truncate text-[0.74rem] text-muted-foreground">
+                  <td className="max-w-[24rem] px-3 py-2.5">
+                    <span className="block truncate text-muted-foreground">
                       {summary(rec)}
                     </span>
                   </td>
-                  <td className="px-3 py-2 text-right">
+                  <td className="px-3 py-2.5 text-right">
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
@@ -84,7 +84,7 @@ export function BottomBar({ rows, selectedId, onSelect, onMore }: Props) {
             })}
             {rows.length === 0 && (
               <tr>
-                <td colSpan={5} className="px-3 py-8 text-center text-[0.8rem] text-muted-foreground">
+                <td colSpan={5} className="px-3 py-8 text-center text-muted-foreground">
                   No projects match the current filters.
                 </td>
               </tr>

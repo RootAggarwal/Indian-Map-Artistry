@@ -48,8 +48,8 @@ export type SurveyRecord = {
   geometry_notes: string[]
   flagged_for_review: boolean
   projects: ProjectRow | null
-  footprint_geojson: string | null
-  centroid_geojson: string | null
+  footprint_geojson: GeoJSON.Geometry | string | null
+  centroid_geojson: GeoJSON.Geometry | string | null
   g1_x: number | null
   g1_y: number | null
   g1_il: number | null
@@ -255,6 +255,27 @@ export async function logAudit(
 
 export function surveyLabel(rec: SurveyRecord) {
   return rec.projects?.project_name ?? `Project ${rec.project_id}`
+}
+
+export async function downloadPdf(rec: SurveyRecord): Promise<void> {
+  const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000/api"
+  const base = API_BASE.replace(/\/api\/?$/, "")
+  const resp = await fetch(`${base}/api/surveys/${rec.id}/pdf`)
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}))
+    throw new Error((err as any).error || `HTTP ${resp.status}`)
+  }
+  const blob = await resp.blob()
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement("a")
+  a.href = url
+  const disposition = resp.headers.get("Content-Disposition") || ""
+  const m = disposition.match(/filename="?(.+?)"?$/)
+  a.download = m ? m[1] : `seismic-dossier-${rec.project_id}.pdf`
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
 }
 
 export function counts<T extends string>(values: (T | null | undefined)[]) {

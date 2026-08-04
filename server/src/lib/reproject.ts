@@ -52,6 +52,26 @@ export function selectFootprintCorners(
   // separated groups (largest gap > 500 km AND > 4x the closest pair) belong
   // to different surveys/regions. Equidistant large blocks (e.g. basin-wide
   // Cauvery rows, all pairs ~200-320 km) stay together.
+
+  // MAD-based outlier detection: any corner whose distance to the centroid
+  // exceeds median + 3*MAD is treated as a digit-entry typo and dropped.
+  if (corners.length >= 3) {
+    const centroidLon = corners.reduce((s, c) => s + c.lon, 0) / corners.length
+    const centroidLat = corners.reduce((s, c) => s + c.lat, 0) / corners.length
+    const distances = corners.map((c) => haversineKm(c, { lon: centroidLon, lat: centroidLat }))
+    const sorted = [...distances].sort((a, b) => a - b)
+    const mid = Math.floor(sorted.length / 2)
+    const median = sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid]
+    const mad = sorted.reduce((s, d) => s + Math.abs(d - median), 0) / sorted.length
+    const threshold = median + 3 * mad
+    const flagged = corners.filter((_, i) => distances[i] > threshold)
+    if (flagged.length > 0 && flagged.length < corners.length) {
+      notes.push(`MAD outlier: ${flagged.map((c) => `corner ${c.corner} (${distances[corners.indexOf(c)].toFixed(0)}km)`).join(", ")} exceed threshold ${threshold.toFixed(0)}km`)
+      const selected = corners.filter((_, i) => distances[i] <= threshold)
+      return { selected, notes, dropped: true }
+    }
+  }
+
   const pairs: { a: number; b: number; d: number }[] = []
   for (let i = 0; i < corners.length; i++) {
     for (let j = i + 1; j < corners.length; j++) {
@@ -227,6 +247,15 @@ export function reprojectRecord(rec: RecordForReproject): ReprojectResult {
   if (!hasFp && res.corners.length >= 2) {
     geometryNotes.push(`Only ${fpCorners.length} distinct corner(s) in the primary cluster — renders as a line`)
   }
+  // A two-corner pair spanning more than ~1500 km almost certainly mixes
+  // corners from different surveys — flag it rather than draw a country-wide line.
+  const implausibleSpan =
+    fpCorners.length === 2 && haversineKm(fpCorners[0], fpCorners[1]) > 1500
+  if (implausibleSpan) {
+    geometryNotes.push(
+      `Corner pair ~${Math.round(haversineKm(fpCorners[0], fpCorners[1]))} km apart — spans far beyond a plausible single survey; flagged for review`
+    )
+  }
 
   return {
     corners: res.corners as unknown[],
@@ -243,6 +272,6 @@ export function reprojectRecord(rec: RecordForReproject): ReprojectResult {
     geometryNotes,
     geometryStatus: res.corners.length >= 1 ? "SURVEYED" : "UNMAPPED",
     isMapped: fpCorners.length >= 1,
-    flagged: res.status === "MANUAL_REVIEW" || footprintSel.dropped,
+    flagged: res.status === "MANUAL_REVIEW" || footprintSel.dropped || implausibleSpan,
   }
 }

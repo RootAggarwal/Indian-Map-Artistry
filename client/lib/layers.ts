@@ -83,6 +83,16 @@ export async function fetchFeatures(layerId: number): Promise<GeoJSON.FeatureCol
   return api.get<GeoJSON.FeatureCollection>(`/layers/${layerId}/features`)
 }
 
+export async function fetchBulkFeatures(
+  layerIds: number[],
+): Promise<Record<string, GeoJSON.FeatureCollection>> {
+  if (layerIds.length === 0) return {}
+  const resp = await api.get<{ layers: Record<string, GeoJSON.FeatureCollection> }>(
+    `/layers/batch/features?ids=${layerIds.join(",")}`,
+  )
+  return resp.layers
+}
+
 const PALETTE = [
   "#e6194b", "#3cb44b", "#ffe119", "#4363d8", "#f58231",
   "#911eb4", "#42d4f4", "#f032e6", "#bfef45", "#fabed4",
