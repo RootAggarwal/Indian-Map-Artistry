@@ -59,6 +59,16 @@ async function migrate() {
         ON processing_records USING GIST (footprint)
     `)
 
+    // CRS / conversion metadata columns
+    await query(`
+      ALTER TABLE processing_records
+        ADD COLUMN IF NOT EXISTS source_crs text,
+        ADD COLUMN IF NOT EXISTS source_epsg integer,
+        ADD COLUMN IF NOT EXISTS target_epsg integer,
+        ADD COLUMN IF NOT EXISTS conversion_status text,
+        ADD COLUMN IF NOT EXISTS validation_issues text[] NOT NULL DEFAULT '{}'
+    `)
+
     // Interpretation polygons — additive schema (idempotent)
     await query(`
       CREATE TABLE IF NOT EXISTS interpretation_polygons (

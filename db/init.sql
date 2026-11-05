@@ -37,6 +37,11 @@ CREATE TABLE IF NOT EXISTS public.processing_records (
   geometry_status TEXT,
   geometry_notes TEXT[] NOT NULL DEFAULT '{}',
   flagged_for_review BOOLEAN NOT NULL DEFAULT false,
+  source_crs TEXT,
+  source_epsg INT,
+  target_epsg INT,
+  conversion_status TEXT,
+  validation_issues TEXT[] NOT NULL DEFAULT '{}',
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   footprint geometry(Polygon, 4326),
   centroid_geom geometry(Point, 4326)

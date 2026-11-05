@@ -27,6 +27,7 @@ import { EntityPanel } from "@/components/seismic/EntityPanel"
 import { BottomBar } from "@/components/seismic/BottomBar"
 import { DetailsDialog } from "@/components/seismic/DetailsDialog"
 import { AddSurveyDialog } from "@/components/seismic/AddSurveyDialog"
+import { ConverterDialog } from "@/components/seismic/ConverterDialog"
 import LayerPanel from "@/components/seismic/LayerPanel"
 import ShapefileUploader from "@/components/seismic/ShapefileUploader"
 import MapDropOverlay from "@/components/seismic/MapDropOverlay"
@@ -83,6 +84,7 @@ export default function Dashboard() {
   const [playing, setPlaying] = useState(false)
   const [query, setQuery] = useState("")
   const [addOpen, setAddOpen] = useState(false)
+  const [converterOpen, setConverterOpen] = useState(false)
   const [lastImport, setLastImport] = useState<{ project_ids: number[]; count: number; mapped: number } | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [detailsOpen, setDetailsOpen] = useState(true)
@@ -223,20 +225,32 @@ export default function Dashboard() {
   }, [layers, bulkFeaturesQuery.data])
 
   async function handleToggleVisibility(id: number) {
-    const lr = layers.find((l) => l.id === id)
-    if (!lr) return
-    await updateLayer(id, { visible: !lr.visible })
-    await layersQuery.refetch()
+    try {
+      const lr = layers.find((l) => l.id === id)
+      if (!lr) return
+      await updateLayer(id, { visible: !lr.visible })
+      await layersQuery.refetch()
+    } catch (err) {
+      console.error("[layers] toggle visibility failed:", err)
+    }
   }
 
   async function handleRemoveLayer(id: number) {
-    await deleteLayer(id)
-    await layersQuery.refetch()
+    try {
+      await deleteLayer(id)
+      await layersQuery.refetch()
+    } catch (err) {
+      console.error("[layers] remove failed:", err)
+    }
   }
 
   async function handleRenameLayer(id: number, name: string) {
-    await updateLayer(id, { name })
-    await layersQuery.refetch()
+    try {
+      await updateLayer(id, { name })
+      await layersQuery.refetch()
+    } catch (err) {
+      console.error("[layers] rename failed:", err)
+    }
   }
 
   function handleZoomToLayer(id: number) {
@@ -245,17 +259,21 @@ export default function Dashboard() {
   }
 
   async function handleReorderLayer(id: number, dir: "up" | "down") {
-    const sorted = [...layers].sort((a, b) => a.display_order - b.display_order)
-    const idx = sorted.findIndex((l) => l.id === id)
-    if (idx < 0) return
-    const swap = dir === "up" ? idx - 1 : idx + 1
-    if (swap < 0 || swap >= sorted.length) return
-    const items = [
-      { id, display_order: sorted[swap].display_order },
-      { id: sorted[swap].id, display_order: sorted[idx].display_order },
-    ]
-    await reorderLayers(items)
-    await layersQuery.refetch()
+    try {
+      const sorted = [...layers].sort((a, b) => a.display_order - b.display_order)
+      const idx = sorted.findIndex((l) => l.id === id)
+      if (idx < 0) return
+      const swap = dir === "up" ? idx - 1 : idx + 1
+      if (swap < 0 || swap >= sorted.length) return
+      const items = [
+        { id, display_order: sorted[swap].display_order },
+        { id: sorted[swap].id, display_order: sorted[idx].display_order },
+      ]
+      await reorderLayers(items)
+      await layersQuery.refetch()
+    } catch (err) {
+      console.error("[layers] reorder failed:", err)
+    }
   }
 
   async function handleLayerCreated() {
@@ -555,6 +573,7 @@ export default function Dashboard() {
             setQuery={setQuery}
             matches={filtered.length}
             onAdd={() => setAddOpen(true)}
+            onConvert={() => setConverterOpen(true)}
             sidebarOpen={sidebarOpen}
             detailsOpen={detailsOpen}
             bottomOpen={bottomOpen}
@@ -759,8 +778,21 @@ export default function Dashboard() {
           await clearAllSurveys()
           await queryClient.invalidateQueries({ queryKey: ["surveys"] })
         }}
+        onExternalExtract={(result) => {
+          void queryClient.invalidateQueries({ queryKey: ["surveys"] })
+          setLastImport({
+            project_ids: result.project_ids,
+            count: result.count,
+            mapped: result.mapped,
+          })
+        }}
         surveys={all}
         basins={[...new Set(all.map((r) => r.projects?.basin).filter(Boolean) as string[])].sort()}
+      />
+
+      <ConverterDialog
+        open={converterOpen}
+        onClose={() => setConverterOpen(false)}
       />
 
       <DetailsDialog

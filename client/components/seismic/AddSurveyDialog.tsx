@@ -1,7 +1,16 @@
 "use client";
 import { useCallback, useRef, useState } from "react";
-import { Upload, X, FileSpreadsheet, Loader2, Plus, Pencil, Trash2, Check, RotateCcw, AlertTriangle } from "lucide-react";
+import { Upload, X, FileSpreadsheet, Loader2, Plus, Pencil, Trash2, Check, RotateCcw, AlertTriangle, Database, RefreshCw, Download } from "lucide-react";
 import type { SurveyDraft, SurveyRecord, SurveyUpdate } from "@/lib/seismic";
+import {
+  fetchExternalStatus,
+  previewExternalTable,
+  extractFromExternal,
+  type ExternalStatus,
+  type ExternalTableInfo,
+  type ExternalPreviewItem,
+  type ExternalExtractResult,
+} from "@/lib/external";
 
 type Props = {
   open: boolean;
@@ -10,6 +19,7 @@ type Props = {
   onDelete: (id: number) => Promise<void>;
   onUpdate: (id: number, data: SurveyUpdate) => Promise<void>;
   onClearAll: () => Promise<void>;
+  onExternalExtract: (result: { project_ids: number[]; count: number; mapped: number }) => void;
   surveys: SurveyRecord[];
   basins: string[];
 };
@@ -164,8 +174,8 @@ function rowToDraft(row: Record<string, unknown>): SurveyDraft | null {
   return out;
 }
 
-export function AddSurveyDialog({ open, onClose, onSubmit, onDelete, onUpdate, onClearAll, surveys, basins }: Props) {
-  const [mode, setMode] = useState<"manual" | "import" | "manage">("manual");
+export function AddSurveyDialog({ open, onClose, onSubmit, onDelete, onUpdate, onClearAll, onExternalExtract, surveys, basins }: Props) {
+  const [mode, setMode] = useState<"manual" | "import" | "manage" | "external">("manual");
   const [draft, setDraft] = useState<SurveyDraft>(EMPTY);
   const [queued, setQueued] = useState<SurveyDraft[]>([]);
   const [busy, setBusy] = useState(false);
@@ -177,6 +187,12 @@ export function AddSurveyDialog({ open, onClose, onSubmit, onDelete, onUpdate, o
   const [editData, setEditData] = useState<SurveyUpdate>({});
   const [deletingId, setDeletingId] = useState<number | null>(null);
   const [confirmClear, setConfirmClear] = useState(false);
+  const [extStatus, setExtStatus] = useState<ExternalStatus | null>(null);
+  const [extBusy, setExtBusy] = useState(false);
+  const [extSelectedTable, setExtSelectedTable] = useState<string | null>(null);
+  const [extPreview, setExtPreview] = useState<ExternalPreviewItem[] | null>(null);
+  const [extMessage, setExtMessage] = useState<string | null>(null);
+  const [extExtracting, setExtExtracting] = useState(false);
 
   const set = <K extends keyof SurveyDraft>(k: K, v: SurveyDraft[K]) =>
     setDraft((d) => ({ ...d, [k]: v }));
@@ -304,7 +320,7 @@ export function AddSurveyDialog({ open, onClose, onSubmit, onDelete, onUpdate, o
         </header>
 
         <div className="flex gap-1 border-b border-border bg-surface-2/60 px-4 py-2">
-          {(["manual", "import", "manage"] as const).map((m) => (
+          {(["manual", "import", "external", "manage"] as const).map((m) => (
             <button
               key={m}
               onClick={() => setMode(m)}
@@ -314,7 +330,7 @@ export function AddSurveyDialog({ open, onClose, onSubmit, onDelete, onUpdate, o
                   : "border-border text-muted-foreground hover:text-foreground"
               }`}
             >
-              {m === "manual" ? "Manual entry" : m === "import" ? "Import files" : "Manage records"}
+              {m === "manual" ? "Manual entry" : m === "import" ? "Import files" : m === "external" ? "External DB" : "Manage records"}
             </button>
           ))}
         </div>
@@ -720,6 +736,155 @@ export function AddSurveyDialog({ open, onClose, onSubmit, onDelete, onUpdate, o
             </div>
           )}
 
+          {mode === "external" && (
+            <div>
+              <div className="mb-3 flex items-center gap-2">
+                <Database className="h-4 w-4 text-seismic" />
+                <p className="slab text-sm text-foreground">External Database</p>
+              </div>
+              <p className="mb-3 text-[0.74rem] text-muted-foreground">
+                Connect to a remote PostgreSQL database to preview and extract survey records.
+                Set <code className="bg-ink px-1 text-ochre">EXTERNAL_DATABASE_URL</code> in <code className="bg-ink px-1 text-ochre">.env</code> and restart the server.
+              </p>
+
+              {extStatus && !extStatus.configured && (
+                <div className="border border-border bg-ink px-4 py-3 text-[0.75rem] text-muted-foreground">
+                  Not configured — set EXTERNAL_DATABASE_URL in .env and restart the server.
+                </div>
+              )}
+
+              {extStatus && extStatus.configured && !extStatus.reachable && (
+                <div className="border border-rust/40 bg-rust/5 px-4 py-3 text-[0.75rem] text-rust">
+                  {extStatus.error || "Could not connect to external database."}
+                </div>
+              )}
+
+              {extStatus && extStatus.reachable && (
+                <div className="mb-3 border border-border bg-ink px-4 py-3">
+                  <p className="rail-label mb-1">Connected to <span className="text-foreground">{extStatus.dbName}</span></p>
+                  <p className="text-[0.72rem] text-muted-foreground truncate">{extStatus.dbVersion}</p>
+                </div>
+              )}
+
+              {extStatus?.tables && extStatus.tables.length > 0 && (
+                <div className="mb-3">
+                  <p className="rail-label mb-2">Tables</p>
+                  <div className="max-h-40 overflow-y-auto border border-border">
+                    {extStatus.tables.map((t) => (
+                      <button
+                        key={t.name}
+                        onClick={() => { setExtSelectedTable(t.name); setExtPreview(null); setExtMessage(null); }}
+                        className={`flex w-full items-center gap-3 px-3 py-2 text-left text-[0.78rem] transition-colors border-b border-border last:border-0 ${
+                          extSelectedTable === t.name
+                            ? "bg-ochre/10 text-ochre"
+                            : "text-foreground hover:bg-surface-2/60"
+                        }`}
+                      >
+                        <span className="min-w-0 flex-1 truncate">{t.name}</span>
+                        <span className="data-cell shrink-0 text-muted-foreground">{t.rowCount.toLocaleString()} rows</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {extSelectedTable && (
+                <div className="flex gap-2 mb-3">
+                  <button
+                    disabled={extBusy}
+                    onClick={async () => {
+                      setExtBusy(true);
+                      setExtMessage(null);
+                      try {
+                        const res = await previewExternalTable(extSelectedTable, undefined, 5);
+                        setExtPreview(res.preview);
+                        setExtMessage(`Previewing ${res.count} rows (key: ${res.keyField})`);
+                      } catch (err) {
+                        setExtMessage(err instanceof Error ? err.message : "Preview failed");
+                      } finally {
+                        setExtBusy(false);
+                      }
+                    }}
+                    className="flex items-center gap-1 border border-border px-3 py-1.5 text-[0.72rem] text-muted-foreground transition-colors hover:border-ochre hover:text-ochre disabled:opacity-40"
+                  >
+                    {extBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
+                    Preview
+                  </button>
+                  <button
+                    disabled={extExtracting}
+                    onClick={async () => {
+                      setExtExtracting(true);
+                      setExtMessage(null);
+                      try {
+                        const res = await extractFromExternal(extSelectedTable);
+                        setExtMessage(`Extracted ${res.inserted} record(s) · ${res.skipped} skipped`);
+                        onExternalExtract({
+                          project_ids: res.project_ids,
+                          count: res.inserted,
+                          mapped: res.inserted,
+                        });
+                      } catch (err) {
+                        setExtMessage(err instanceof Error ? err.message : "Extract failed");
+                      } finally {
+                        setExtExtracting(false);
+                      }
+                    }}
+                    className="flex items-center gap-1 border border-ochre bg-ochre px-3 py-1.5 text-[0.68rem] font-semibold uppercase tracking-[0.14em] text-primary-foreground transition-opacity disabled:opacity-40"
+                  >
+                    {extExtracting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+                    Extract
+                  </button>
+                </div>
+              )}
+
+              {extPreview && extPreview.length > 0 && (
+                <div className="max-h-48 overflow-auto border border-border">
+                  <table className="w-full text-[0.72rem]">
+                    <thead>
+                      <tr className="border-b border-border bg-surface-2/60">
+                        <th className="px-2 py-1 text-left text-muted-foreground">Key</th>
+                        <th className="px-2 py-1 text-left text-muted-foreground">Project Name</th>
+                        <th className="px-2 py-1 text-left text-muted-foreground">Basin</th>
+                        <th className="px-2 py-1 text-left text-muted-foreground">Year</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {extPreview.map((item, i) => (
+                        <tr key={i} className="border-b border-border last:border-0">
+                          <td className="px-2 py-1 text-muted-foreground">{item.key ?? "—"}</td>
+                          <td className="px-2 py-1 text-foreground">{String(item.mapped.project_name ?? "—")}</td>
+                          <td className="px-2 py-1 text-muted-foreground">{String(item.mapped.basin ?? "—")}</td>
+                          <td className="px-2 py-1 text-muted-foreground">{String(item.mapped.project_year ?? "—")}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {!extStatus && !extBusy && (
+                <button
+                  disabled={extBusy}
+                  onClick={async () => {
+                    setExtBusy(true);
+                    try {
+                      const status = await fetchExternalStatus();
+                      setExtStatus(status);
+                    } catch (err) {
+                      setExtMessage(err instanceof Error ? err.message : "Status check failed");
+                    } finally {
+                      setExtBusy(false);
+                    }
+                  }}
+                  className="flex items-center gap-1 border border-border px-3 py-1.5 text-[0.72rem] text-muted-foreground transition-colors hover:border-ochre hover:text-ochre"
+                >
+                  {extBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
+                  Check connection
+                </button>
+              )}
+            </div>
+          )}
+
           {message && (
             <p className="mt-3 border border-border bg-ink px-3 py-2 text-[0.75rem] text-foreground/85">
               {message}
@@ -729,20 +894,24 @@ export function AddSurveyDialog({ open, onClose, onSubmit, onDelete, onUpdate, o
 
         <footer className="flex items-center justify-between gap-3 border-t border-border bg-ink px-4 py-3">
           <p className="text-[0.72rem] text-muted-foreground">
-            Saved records appear on the map and tables immediately.
+            {mode === "external"
+              ? "Extracted records appear on the map and tables immediately."
+              : "Saved records appear on the map and tables immediately."}
           </p>
           <div className="flex items-center gap-2">
             <button onClick={onClose} className="rail-label border border-border px-3 py-2">
-              Cancel
+              {mode === "external" ? "Close" : "Cancel"}
             </button>
-            <button
-              disabled={busy || (mode === "manual" ? draft.project_name.trim().length < 2 : !queued.length)}
-              onClick={() => void submit(mode === "manual" ? [draft] : queued)}
-              className="flex items-center gap-2 border border-ochre bg-ochre px-4 py-2 text-[0.68rem] font-semibold uppercase tracking-[0.14em] text-primary-foreground transition-opacity disabled:opacity-40"
-            >
-              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
-              {mode === "manual" ? "Add survey" : `Import ${queued.length || ""}`}
-            </button>
+            {mode !== "external" && (
+              <button
+                disabled={busy || (mode === "manual" ? draft.project_name.trim().length < 2 : !queued.length)}
+                onClick={() => void submit(mode === "manual" ? [draft] : queued)}
+                className="flex items-center gap-2 border border-ochre bg-ochre px-4 py-2 text-[0.68rem] font-semibold uppercase tracking-[0.14em] text-primary-foreground transition-opacity disabled:opacity-40"
+              >
+                {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
+                {mode === "manual" ? "Add survey" : `Import ${queued.length || ""}`}
+              </button>
+            )}
           </div>
         </footer>
       </div>

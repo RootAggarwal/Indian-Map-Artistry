@@ -13,6 +13,7 @@ import {
   Search,
   X,
   Plus,
+  FileDown,
   PanelLeftClose,
   PanelRightClose,
   PanelBottomClose,
@@ -38,6 +39,7 @@ type Props = {
   setQuery: (q: string) => void
   matches: number
   onAdd: () => void
+  onConvert: () => void
   sidebarOpen: boolean
   detailsOpen: boolean
   bottomOpen: boolean
@@ -64,6 +66,7 @@ export function RibbonBar({
   setQuery,
   matches,
   onAdd,
+  onConvert,
   sidebarOpen,
   detailsOpen,
   bottomOpen,
@@ -185,6 +188,15 @@ export function RibbonBar({
       >
         <Printer className="h-4 w-4" />
         <span className="hidden sm:inline">Print</span>
+      </button>
+
+      <button
+        className="flex h-8 items-center gap-1.5 border border-seismic/50 bg-seismic/10 px-2.5 text-[0.68rem] font-semibold uppercase tracking-[0.14em] text-seismic transition-colors hover:bg-seismic hover:text-primary-foreground"
+        onClick={onConvert}
+        title="Convert any dataset to Shapefile"
+      >
+        <FileDown className="h-4 w-4" />
+        <span className="hidden sm:inline">Convert</span>
       </button>
 
       <span className="h-5 w-px bg-border" />
